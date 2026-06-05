@@ -1,0 +1,504 @@
+-- ============================================================
+-- TEMPLATE 000016 — Per-business catalogue
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Substitute {{BUSINESS}} with the brand schema name
+-- (e.g. 'pixiegirl', 'faitlynhair') via bootstrapBusiness.js.
+--
+-- This is the master product catalogue for one brand. The catalogue
+-- feeds: storefront (6.4), POS (6.3), sales-channel sync (WooCommerce,
+-- Instagram, future Amazon/Jumia), stock movements (6.9), pricing
+-- engine (6.25), and production (6.24 → cost_price flows IN here).
+--
+-- Tables:
+--   product_categories          — hierarchical category tree
+--   product_collections         — curated or rule-based product groups
+--   product_collection_rules    — auto-population rules
+--   product_collection_members  — explicit membership (curated)
+--   products                    — master product (wig-aware fields)
+--   product_variants            — SKU-level, channel-priced
+--   product_images              — gallery, ordered
+--   product_videos              — YouTube/Reels embed
+--   product_attribute_values    — extensible attributes (per custom_field_defs)
+--   product_seo                 — meta tags + JSON-LD overrides
+--   product_related             — manual + auto cross-sell pairs
+-- ============================================================
+
+-- ── product_categories ───────────────────────────────────
+-- Hierarchical (tree via parent_category_id). Examples for PXG:
+-- "Wigs" → "Pixie Wigs" / "Frontal Wigs" / "Closures" / "Bundles".
+-- Slug drives the storefront URL: /wigs/pixie-wigs/...
+CREATE TABLE {{BUSINESS}}.product_categories (
+  category_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  parent_category_id    UUID        REFERENCES {{BUSINESS}}.product_categories (category_id) ON DELETE SET NULL,
+  name                  TEXT        NOT NULL,
+  slug                  TEXT        NOT NULL,                  -- 'pixie-wigs'
+  description           TEXT,
+  hero_image_url        TEXT,
+  -- SEO
+  meta_title            TEXT,
+  meta_description      TEXT,
+  -- Sort order in nav and category page listing
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_visible_storefront BOOLEAN     NOT NULL DEFAULT true,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (slug)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_product_categories_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.product_categories
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_product_categories_parent
+  ON {{BUSINESS}}.product_categories (parent_category_id);
+CREATE INDEX idx_{{BUSINESS}}_product_categories_visible
+  ON {{BUSINESS}}.product_categories (display_order)
+  WHERE is_active = true AND is_visible_storefront = true;
+
+-- ── product_collections ──────────────────────────────────
+-- Curated or rule-based (e.g. "New Arrivals", "Best Sellers",
+-- "Summer Collection", "Under ₦100,000"). Distinct from categories —
+-- a product can be in many collections, plus its single category tree.
+CREATE TABLE {{BUSINESS}}.product_collections (
+  collection_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                  TEXT        NOT NULL,
+  slug                  TEXT        NOT NULL UNIQUE,
+  description           TEXT,
+  hero_image_url        TEXT,
+  -- 'manual' = members list explicitly; 'rule' = auto-populated
+  mode                  TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (mode IN ('manual','rule')),
+  -- For storefront featured-collection cards
+  display_image_url     TEXT,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_visible_storefront BOOLEAN     NOT NULL DEFAULT true,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  -- SEO
+  meta_title            TEXT,
+  meta_description      TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_product_collections_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.product_collections
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_product_collections_visible
+  ON {{BUSINESS}}.product_collections (display_order)
+  WHERE is_active = true AND is_visible_storefront = true;
+
+-- ── product_collection_rules ─────────────────────────────
+-- Used when mode='rule'. The rule engine evaluates these to populate
+-- the collection automatically (e.g. "all products added in the last
+-- 30 days", "all products with price < 100000", "all variants of
+-- category Frontal Wigs").
+CREATE TABLE {{BUSINESS}}.product_collection_rules (
+  rule_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_id         UUID        NOT NULL REFERENCES {{BUSINESS}}.product_collections (collection_id) ON DELETE CASCADE,
+  -- The field being filtered
+  field                 TEXT        NOT NULL,                  -- 'created_at','price_ngn','category_id','tag','texture','colour'
+  operator              TEXT        NOT NULL                   -- '=','!=','<','>','<=','>=','in','contains','starts_with'
+                        CHECK (operator IN ('=','!=','<','>','<=','>=','in','contains','starts_with')),
+  value                 JSONB       NOT NULL,                  -- string, number, array; type matches the field
+  -- Combine rules with AND (intersection) or OR (union)
+  combinator            TEXT        NOT NULL DEFAULT 'AND'
+                        CHECK (combinator IN ('AND','OR')),
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_collection_rules_coll
+  ON {{BUSINESS}}.product_collection_rules (collection_id);
+
+-- ── products ─────────────────────────────────────────────
+-- Master product record. Variants carry SKUs, prices, and stock.
+-- Wig-specific attribute fields are NORMALISED as first-class columns
+-- because they are heavily searched/filtered on the storefront.
+-- Anything else extensible goes into product_attribute_values via
+-- shared.custom_field_defs.
+CREATE TABLE {{BUSINESS}}.products (
+  product_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Stable code: '{{BUSINESS}}'-PRD-{seq} (or human-set via admin).
+  product_code          TEXT        NOT NULL UNIQUE,
+  category_id           UUID        REFERENCES {{BUSINESS}}.product_categories (category_id) ON DELETE SET NULL,
+  name                  TEXT        NOT NULL,
+  slug                  TEXT        NOT NULL UNIQUE,           -- 'hd-lace-pixie-cut-natural-black'
+  short_description     TEXT,
+  long_description      TEXT,
+  -- Wig-specific attributes (top filterable fields on storefront)
+  -- These are NULL-able because Faitlyn services (e.g. installation)
+  -- and other future product lines don't need them.
+  texture_type          TEXT,                                  -- 'relaxed','multi_racial','natural','straight','wavy','curly'
+  lace_type             TEXT,                                  -- 'hd_lace','swiss_lace','glueless_lace','no_lace'
+  hair_length_inches    SMALLINT,                              -- 10..30
+  density               TEXT,                                  -- '130%','150%','180%','200%','250%'
+  cap_size              TEXT,                                  -- 'small','medium','large','adjustable'
+  primary_colour        TEXT,                                  -- '1B Natural Black','#27 Honey Blonde'...
+  hair_origin           TEXT,                                  -- 'human','synthetic','blend'
+  care_instructions     TEXT,
+  -- Product type — drives storefront filters and routing.
+  -- 'physical' = wig / accessory / bundle
+  -- 'service'  = Faitlyn installation/maintenance
+  -- 'digital'  = future
+  product_type          TEXT        NOT NULL DEFAULT 'physical'
+                        CHECK (product_type IN ('physical','service','digital')),
+  -- A wig is "custom" if it requires production work after order
+  -- (weaving, styling, etc.) — drives the order-timeline stages
+  -- and the 50%-non-refundable cancellation rule.
+  is_custom             BOOLEAN     NOT NULL DEFAULT false,
+  -- Storefront publishing
+  is_visible_storefront BOOLEAN     NOT NULL DEFAULT true,
+  visible_on_channels   TEXT[]      NOT NULL DEFAULT '{storefront,pos}',
+  -- 'storefront','pos','woocommerce','instagram','whatsapp','wholesale'
+  -- Brand/Origin (separate from supplier — origin is what shows to
+  -- customers, supplier lives on supplier_products).
+  -- Origin (e.g. 'China') is HIDDEN from non-cost roles per V2.2 §6.24.
+  brand_name            TEXT,                                  -- 'Pixie Girl Global'
+  -- SEO base (per-page overrides on product_seo)
+  meta_title            TEXT,
+  meta_description      TEXT,
+  -- Inventory + pricing tracking
+  track_stock           BOOLEAN     NOT NULL DEFAULT true,
+  taxable               BOOLEAN     NOT NULL DEFAULT true,
+  vat_rate              NUMERIC(5,4),                           -- override; NULL = business default
+  -- Search / filtering helpers
+  search_keywords       TEXT[]      NOT NULL DEFAULT '{}',
+  -- Soft-delete (we never hard-delete products with order history)
+  is_deleted            BOOLEAN     NOT NULL DEFAULT false,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at            TIMESTAMPTZ,
+  published_at          TIMESTAMPTZ                              -- first time it became visible_storefront=true
+);
+CREATE TRIGGER trg_{{BUSINESS}}_products_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.products
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_products_category
+  ON {{BUSINESS}}.products (category_id) WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_products_visible
+  ON {{BUSINESS}}.products (category_id, published_at DESC)
+  WHERE is_deleted = false AND is_visible_storefront = true;
+CREATE INDEX idx_{{BUSINESS}}_products_name_trgm
+  ON {{BUSINESS}}.products USING GIN (name gin_trgm_ops);
+CREATE INDEX idx_{{BUSINESS}}_products_keywords
+  ON {{BUSINESS}}.products USING GIN (search_keywords);
+CREATE INDEX idx_{{BUSINESS}}_products_filters
+  ON {{BUSINESS}}.products (texture_type, lace_type, hair_length_inches, primary_colour)
+  WHERE is_deleted = false AND is_visible_storefront = true;
+CREATE INDEX idx_{{BUSINESS}}_products_channels
+  ON {{BUSINESS}}.products USING GIN (visible_on_channels)
+  WHERE is_deleted = false;
+
+-- ── product_variants ─────────────────────────────────────
+-- A single product has 1..N variants (length × colour × density,
+-- etc.). Stock is tracked at variant level. The variant carries the
+-- channel-priced selling prices (storefront / POS / wholesale).
+CREATE TABLE {{BUSINESS}}.product_variants (
+  variant_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  -- Stock-keeping unit. Globally unique within this brand.
+  sku                   TEXT        NOT NULL UNIQUE,           -- 'PXG-PXC-18-1B'
+  barcode               TEXT        UNIQUE,                     -- EAN/UPC if scanned
+  -- Variant-distinguishing axes (snapshot at this variant level,
+  -- not at the product level — products list all options, the
+  -- variant nails them down).
+  variant_name          TEXT        NOT NULL,                  -- '18" — 1B Natural Black'
+  variant_length_inches SMALLINT,
+  variant_colour        TEXT,
+  variant_density       TEXT,
+  variant_cap_size      TEXT,
+  -- ── Channel-specific selling prices (in NGN base). Storefront
+  -- converts to display currency at render time using the rates in
+  -- shared.currency_rates. Pricing Engine (6.25) writes here after
+  -- CEO approval.
+  price_storefront_ngn  NUMERIC(14,2),
+  price_pos_ngn         NUMERIC(14,2),
+  price_wholesale_ngn   NUMERIC(14,2),                          -- inter-company min-margin enforced
+  price_partner_ngn     NUMERIC(14,2),                          -- stylist partner price
+  compare_at_price_ngn  NUMERIC(14,2),                          -- "was" price for sale badges
+  -- ── Cost (written by Production, 6.24). Sensitive — hidden from
+  -- non-cost roles by repository-layer filter.
+  cost_price_ngn        NUMERIC(14,2),
+  cost_last_refreshed_at TIMESTAMPTZ,
+  -- Pricing-engine bookkeeping
+  min_price_ngn         NUMERIC(14,2),                          -- hard floor per 6.25
+  min_margin_pct        NUMERIC(5,2),
+  -- Physical attributes for shipping
+  weight_g              INTEGER,                                -- for courier rate quotes
+  -- ── External channel IDs (Amendment-2) ─────────────────
+  -- Remote platform IDs for bidirectional sync. Stored as JSONB so
+  -- new channels can be added without schema changes. Examples:
+  --   {"woocommerce": "12345", "jumia": "abc-xyz", "amazon": "B0..."}
+  -- The sync service uses these for idempotent upserts; a NULL or
+  -- missing key means "not yet pushed to that channel". Resolves
+  -- audit GAP-2 (WooCommerce bidirectional sync).
+  channel_external_ids  JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Sync metadata (last-pushed-at per channel)
+  channel_sync_state    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Inventory
+  reorder_point         INTEGER     NOT NULL DEFAULT 0,
+  reorder_quantity      INTEGER,
+  -- Variant ordering on product page
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_default            BOOLEAN     NOT NULL DEFAULT false,    -- default variant on product page load
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_product_variants_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.product_variants
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_variants_product
+  ON {{BUSINESS}}.product_variants (product_id, display_order)
+  WHERE is_active = true;
+CREATE INDEX idx_{{BUSINESS}}_variants_sku
+  ON {{BUSINESS}}.product_variants (sku);
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_variants_default
+  ON {{BUSINESS}}.product_variants (product_id) WHERE is_default = true;
+CREATE INDEX idx_{{BUSINESS}}_variants_reorder
+  ON {{BUSINESS}}.product_variants (product_id)
+  WHERE is_active = true;   -- partial; reorder logic queries this set
+-- Reverse-lookup index for channel sync (Amendment-2):
+-- "find the local variant given woocommerce=12345" → uses jsonb path ops.
+CREATE INDEX idx_{{BUSINESS}}_variants_channel_external_ids
+  ON {{BUSINESS}}.product_variants USING GIN (channel_external_ids jsonb_path_ops);
+
+-- ── product_collection_members ───────────────────────────
+-- Explicit membership (mode='manual') and a materialised cache for
+-- mode='rule' collections — the rule engine refreshes this rather
+-- than re-evaluating rules on every storefront page load.
+CREATE TABLE {{BUSINESS}}.product_collection_members (
+  member_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_id         UUID        NOT NULL REFERENCES {{BUSINESS}}.product_collections (collection_id) ON DELETE CASCADE,
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  added_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  added_by              UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- 'manual' = curated; 'rule' = inserted by the rule engine
+  source                TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (source IN ('manual','rule')),
+  UNIQUE (collection_id, product_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_collection_members_coll
+  ON {{BUSINESS}}.product_collection_members (collection_id, display_order);
+CREATE INDEX idx_{{BUSINESS}}_collection_members_prod
+  ON {{BUSINESS}}.product_collection_members (product_id);
+
+-- ── product_images ───────────────────────────────────────
+-- Image gallery. Optimised pipeline: Sharp converts to WebP on
+-- upload, generates responsive srcset. Storage points are S3 keys
+-- (file_path column) — the storefront resolves them through the
+-- CDN edge URL.
+CREATE TABLE {{BUSINESS}}.product_images (
+  image_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  -- NULL variant_id = image belongs to the product (main gallery).
+  -- Non-NULL = variant-specific (e.g. colour-specific photo).
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  -- Storage references
+  file_path             TEXT        NOT NULL,                  -- S3 key
+  webp_path             TEXT,                                  -- generated WebP key
+  cdn_url               TEXT,                                  -- denormalised resolved URL
+  -- Responsive srcset (set of {width: key} pairs)
+  responsive_paths      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- SEO/accessibility
+  alt_text              TEXT,
+  caption               TEXT,
+  -- Display
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_primary            BOOLEAN     NOT NULL DEFAULT false,
+  width_px              SMALLINT,
+  height_px             SMALLINT,
+  file_size_bytes       INTEGER,
+  uploaded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  uploaded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_product_images_product
+  ON {{BUSINESS}}.product_images (product_id, display_order);
+CREATE INDEX idx_{{BUSINESS}}_product_images_variant
+  ON {{BUSINESS}}.product_images (variant_id) WHERE variant_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_product_images_primary
+  ON {{BUSINESS}}.product_images (product_id) WHERE is_primary = true;
+
+-- ── product_videos ───────────────────────────────────────
+-- YouTube tutorials, Instagram Reels, brand videos. Embedded on the
+-- product page. The oEmbed payload is cached so we don't re-fetch.
+CREATE TABLE {{BUSINESS}}.product_videos (
+  video_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  source                TEXT        NOT NULL CHECK (source IN ('youtube','instagram_reel','tiktok','direct_upload')),
+  external_ref          TEXT        NOT NULL,                  -- YouTube video ID / Instagram post ID
+  embed_url             TEXT        NOT NULL,
+  thumbnail_url         TEXT,
+  title                 TEXT,
+  caption               TEXT,
+  duration_seconds      INTEGER,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_primary            BOOLEAN     NOT NULL DEFAULT false,
+  added_by              UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  added_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_product_videos_product
+  ON {{BUSINESS}}.product_videos (product_id, display_order);
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_product_videos_primary
+  ON {{BUSINESS}}.product_videos (product_id) WHERE is_primary = true;
+
+-- ── product_attribute_values ─────────────────────────────
+-- Extensible attributes per shared.custom_field_defs (entity_type='product').
+-- For values that don't fit the normalised wig-attribute columns.
+-- E.g. a brand-specific "Style Inspiration" or "Worn By Celebrity"
+-- field gets one row per (product, field_def).
+CREATE TABLE {{BUSINESS}}.product_attribute_values (
+  value_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  -- The field definition (in shared.custom_field_defs).
+  field_id              UUID        NOT NULL REFERENCES shared.custom_field_defs (field_id) ON DELETE CASCADE,
+  -- All values stored as text/jsonb for flexibility. Service layer
+  -- coerces to the field_type (number/date/bool/select) on read.
+  value_text            TEXT,
+  value_number          NUMERIC(20,6),
+  value_date            DATE,
+  value_boolean         BOOLEAN,
+  value_json            JSONB,                                  -- multiselect, structured
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (product_id, field_id)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_product_attr_values_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.product_attribute_values
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_product_attr_values_field
+  ON {{BUSINESS}}.product_attribute_values (field_id);
+
+-- ── product_seo ──────────────────────────────────────────
+-- Per-page SEO overrides + JSON-LD structured-data extras. The
+-- storefront merges these with the auto-generated meta tags.
+CREATE TABLE {{BUSINESS}}.product_seo (
+  product_id            UUID        PRIMARY KEY REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  -- Manual overrides; NULL = use the auto-generated default
+  meta_title_override   TEXT,
+  meta_description_override TEXT,
+  canonical_url         TEXT,
+  -- Open Graph + Twitter
+  og_image_url          TEXT,
+  og_title              TEXT,
+  og_description        TEXT,
+  twitter_card          TEXT        DEFAULT 'summary_large_image',
+  -- Schema.org / JSON-LD extras (gtin, mpn, brand mentions, etc.)
+  schema_extras         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- 'index,follow' default. Allow noindex for legacy products.
+  robots_directive      TEXT        NOT NULL DEFAULT 'index,follow',
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_product_seo_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.product_seo
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── product_related ──────────────────────────────────────
+-- "Customers who bought this also bought" + "Complete the look".
+-- A row pairs (product_id → related_product_id) directionally with
+-- a relation_type. Maintained by both manual curation (admin) and
+-- a periodic batch job that reads co-purchase history from order_lines.
+CREATE TABLE {{BUSINESS}}.product_related (
+  pair_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  related_product_id    UUID        NOT NULL REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  relation_type         TEXT        NOT NULL DEFAULT 'related'
+                        CHECK (relation_type IN ('related','complementary','also_bought','upgrade','accessory')),
+  score                 NUMERIC(5,4),                           -- 0..1 — co-purchase frequency
+  source                TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (source IN ('manual','co_purchase','similarity','editorial')),
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (product_id, related_product_id, relation_type),
+  CONSTRAINT product_related_no_self CHECK (product_id <> related_product_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_product_related_lookup
+  ON {{BUSINESS}}.product_related (product_id, relation_type, display_order);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ STOREFRONT CONTENT POSTS (Amendment-1)                             ║
+-- ║ Blog articles, FAQ entries, Wig Care Guide. Each is individually   ║
+-- ║ URL'd and SEO-indexed. Distinct from storefront_pages (which is    ║
+-- ║ for fixed-template pages: home, about, contact, lookbook). Posts   ║
+-- ║ are a continuous publish stream. Resolves audit GAP-1.             ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE {{BUSINESS}}.storefront_content_posts (
+  post_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Type: 'blog' = SEO blog post; 'faq' = FAQ entry; 'guide' = wig care
+  -- guide section; 'lookbook' = magazine-style lookbook page
+  post_type             TEXT        NOT NULL
+                        CHECK (post_type IN ('blog','faq','guide','lookbook','press')),
+  slug                  TEXT        NOT NULL UNIQUE,            -- '/blog/wig-care-summer-tips'
+  title                 TEXT        NOT NULL,
+  -- Short summary shown on listing pages
+  excerpt               TEXT,
+  -- Body: rich text / markdown
+  body                  TEXT        NOT NULL,
+  -- Hero image
+  hero_image_url        TEXT,
+  hero_image_alt        TEXT,
+  -- FAQ-specific
+  faq_category          TEXT,                                    -- 'shipping','returns','care','sizing'
+  faq_question          TEXT,                                    -- when post_type='faq', this is the question
+  -- Author
+  author_user_id        UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  author_display_name   TEXT,
+  -- Linked products (drives "shop the products from this post" cards)
+  linked_product_ids    UUID[]      NOT NULL DEFAULT '{}',
+  -- Linked collections
+  linked_collection_ids UUID[]      NOT NULL DEFAULT '{}',
+  -- Tags / keywords (for related-post engine)
+  tags                  TEXT[]      NOT NULL DEFAULT '{}',
+  -- SEO
+  meta_title            TEXT,
+  meta_description      TEXT,
+  canonical_url         TEXT,
+  og_image_url          TEXT,
+  -- Structured data extras (e.g. FAQ schema, HowTo schema) merged
+  -- with the auto-generated JSON-LD by the storefront renderer
+  schema_extras         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','scheduled','published','archived')),
+  published_at          TIMESTAMPTZ,
+  scheduled_publish_at  TIMESTAMPTZ,
+  archived_at           TIMESTAMPTZ,
+  -- Display
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_featured           BOOLEAN     NOT NULL DEFAULT false,
+  reading_time_minutes  SMALLINT,
+  -- Stats (refreshed periodically; never the source of truth for analytics)
+  view_count            INTEGER     NOT NULL DEFAULT 0,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_storefront_content_posts_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.storefront_content_posts
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_content_posts_published
+  ON {{BUSINESS}}.storefront_content_posts (post_type, published_at DESC)
+  WHERE status = 'published';
+CREATE INDEX idx_{{BUSINESS}}_content_posts_slug
+  ON {{BUSINESS}}.storefront_content_posts (slug);
+CREATE INDEX idx_{{BUSINESS}}_content_posts_scheduled
+  ON {{BUSINESS}}.storefront_content_posts (scheduled_publish_at)
+  WHERE status = 'scheduled';
+CREATE INDEX idx_{{BUSINESS}}_content_posts_featured
+  ON {{BUSINESS}}.storefront_content_posts (post_type, display_order)
+  WHERE is_featured = true AND status = 'published';
+CREATE INDEX idx_{{BUSINESS}}_content_posts_tags
+  ON {{BUSINESS}}.storefront_content_posts USING GIN (tags);
+CREATE INDEX idx_{{BUSINESS}}_content_posts_linked_products
+  ON {{BUSINESS}}.storefront_content_posts USING GIN (linked_product_ids);
+
+-- ============================================================
+-- Verify
+-- After applying with substitution:
+-- SELECT table_name FROM information_schema.tables
+-- WHERE table_schema = '{{BUSINESS}}'
+-- ORDER BY table_name;
+-- Expected (after this file): 11 catalogue tables (10 product_* + 1 content)
+-- ============================================================

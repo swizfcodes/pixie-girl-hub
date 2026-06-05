@@ -1,0 +1,499 @@
+-- ============================================================
+-- TEMPLATE 000024 — Per-business purchasing
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.8 — Purchasing & Procurement.
+--
+-- Full cycle from RFQ through PO, GRN, three-way matching, and
+-- supplier invoice payment. PXG's PO state machine drives the
+-- "Incoming" view (inbound_shipments in stock template) — they
+-- mirror each other through the po_line_id soft FK.
+--
+-- Tables:
+--   suppliers                — supplier master
+--   supplier_contacts        — multiple contacts per supplier
+--   supplier_products        — supplier's catalogue ↔ our variants
+--   rfqs                     — request for quotation header
+--   rfq_lines                — line items requested
+--   rfq_quotes               — supplier responses to an RFQ
+--   purchase_orders          — confirmed PO header (with factory state machine)
+--   po_lines                 — line items
+--   po_state_history         — audit of state transitions
+--   goods_received_notes     — receipt header
+--   grn_lines                — receipt lines (matches po_lines)
+--   supplier_invoices        — bill received from supplier
+--   supplier_invoice_lines   — line items
+--   supplier_invoice_matches — three-way match: PO ↔ GRN ↔ Invoice
+-- ============================================================
+
+-- ── suppliers ────────────────────────────────────────────
+-- Supplier master record. Linked to shared.contacts so the
+-- supplier's communication history (Smartcomm) flows here, but
+-- the operational supplier data lives in this brand schema.
+CREATE TABLE {{BUSINESS}}.suppliers (
+  supplier_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_code         TEXT        NOT NULL UNIQUE,            -- 'SUP-CN-001'
+  contact_id            UUID        NOT NULL UNIQUE REFERENCES shared.contacts (contact_id),
+  display_name          TEXT        NOT NULL,
+  -- Classification
+  supplier_type         TEXT        NOT NULL DEFAULT 'goods'
+                        CHECK (supplier_type IN ('goods','services','factory','3pl','customs_broker','utility')),
+  -- Origin (hidden from non-cost roles per V2.2 §6.24 — same rule as on products)
+  country_of_origin     TEXT,                                   -- 'China','Nigeria','India'
+  city                  TEXT,
+  -- Default trading currency
+  default_currency      TEXT        REFERENCES shared.currencies (currency_code),
+  -- Tax handling
+  tax_treatment         TEXT        DEFAULT 'standard'
+                        CHECK (tax_treatment IN ('standard','zero_rated','exempt','foreign','reverse_charge')),
+  vat_applicable        BOOLEAN     NOT NULL DEFAULT true,
+  wht_applicable        BOOLEAN     NOT NULL DEFAULT false,
+  wht_rate              NUMERIC(5,4),
+  -- Payment terms
+  payment_terms_days    SMALLINT    NOT NULL DEFAULT 0,        -- 0 = pay on receipt
+  credit_limit_ngn      NUMERIC(14,2),
+  -- Banking (encrypted at app layer for foreign suppliers)
+  bank_name             TEXT,
+  bank_account_number   TEXT,
+  bank_swift            TEXT,
+  bank_routing          TEXT,
+  bank_address          TEXT,
+  -- Quality + relationship
+  performance_rating    NUMERIC(3,2),                           -- 0..5; computed from POs
+  preferred             BOOLEAN     NOT NULL DEFAULT false,
+  on_hold               BOOLEAN     NOT NULL DEFAULT false,
+  hold_reason           TEXT,
+  -- Audit
+  notes                 TEXT,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_suppliers_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.suppliers
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_suppliers_type
+  ON {{BUSINESS}}.suppliers (supplier_type) WHERE is_active = true;
+CREATE INDEX idx_{{BUSINESS}}_suppliers_preferred
+  ON {{BUSINESS}}.suppliers (preferred) WHERE is_active = true AND preferred = true;
+
+-- ── supplier_contacts ────────────────────────────────────
+-- A supplier may have multiple contact people (sales rep, accounts).
+CREATE TABLE {{BUSINESS}}.supplier_contacts (
+  contact_link_id       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.suppliers (supplier_id) ON DELETE CASCADE,
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  role                  TEXT,                                    -- 'sales_rep','accounts','operations','owner'
+  is_primary            BOOLEAN     NOT NULL DEFAULT false,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (supplier_id, contact_id)
+);
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_supplier_contacts_primary
+  ON {{BUSINESS}}.supplier_contacts (supplier_id) WHERE is_primary = true;
+
+-- ── supplier_products ────────────────────────────────────
+-- Maps OUR variants to SUPPLIER's product references (SKU, lead time,
+-- MOQ, last price). Drives RFQ pre-population.
+CREATE TABLE {{BUSINESS}}.supplier_products (
+  link_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.suppliers (supplier_id) ON DELETE CASCADE,
+  variant_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  supplier_sku          TEXT,
+  supplier_description  TEXT,
+  -- Commercial
+  last_unit_cost        NUMERIC(14,2),
+  last_unit_cost_currency TEXT      REFERENCES shared.currencies (currency_code),
+  last_unit_cost_ngn    NUMERIC(14,2),
+  last_purchased_at     TIMESTAMPTZ,
+  -- Lead time + MOQ
+  lead_time_days        SMALLINT,
+  minimum_order_qty     INTEGER,
+  preferred             BOOLEAN     NOT NULL DEFAULT false,    -- preferred supplier for this variant
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (supplier_id, variant_id)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_supplier_products_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.supplier_products
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_supplier_products_variant
+  ON {{BUSINESS}}.supplier_products (variant_id);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ REQUEST FOR QUOTATION                                              ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── rfqs ─────────────────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.rfqs (
+  rfq_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rfq_number            TEXT        NOT NULL UNIQUE,            -- 'PXG-RFQ-0001'
+  title                 TEXT        NOT NULL,
+  description           TEXT,
+  -- Invited suppliers (one RFQ can go to N suppliers)
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','sent','responding','closed_for_response','awarded','cancelled')),
+  response_deadline     DATE,
+  awarded_supplier_id   UUID        REFERENCES {{BUSINESS}}.suppliers (supplier_id) ON DELETE SET NULL,
+  awarded_quote_id      UUID,                                    -- FK wired after rfq_quotes
+  awarded_at            TIMESTAMPTZ,
+  awarded_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Linked PO once awarded
+  resulting_po_id       UUID,                                    -- FK wired after purchase_orders
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_rfqs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.rfqs
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_rfqs_status
+  ON {{BUSINESS}}.rfqs (status, created_at DESC);
+
+CREATE TABLE {{BUSINESS}}.rfq_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rfq_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.rfqs (rfq_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  unit_of_measure       TEXT        NOT NULL DEFAULT 'each',
+  target_unit_price_ngn NUMERIC(14,2),
+  notes                 TEXT,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_rfq_lines_rfq
+  ON {{BUSINESS}}.rfq_lines (rfq_id);
+
+-- ── rfq_quotes ───────────────────────────────────────────
+-- One quote per supplier per RFQ. Multiple quotes per RFQ for
+-- comparison. Awarded one becomes the basis of the PO.
+CREATE TABLE {{BUSINESS}}.rfq_quotes (
+  quote_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rfq_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.rfqs (rfq_id) ON DELETE CASCADE,
+  supplier_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.suppliers (supplier_id),
+  -- Quote details
+  quote_currency        TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  total_quoted          NUMERIC(14,2) NOT NULL,
+  total_quoted_ngn      NUMERIC(14,2) NOT NULL,
+  fx_rate_used          NUMERIC(15,6) NOT NULL DEFAULT 1.000000,
+  -- Line-level prices stored in JSONB for fast comparison
+  line_prices           JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  -- Terms
+  payment_terms_days    SMALLINT,
+  lead_time_days        SMALLINT,
+  validity_until        DATE,
+  shipping_terms        TEXT,                                    -- FOB, CIF, etc.
+  -- Document
+  quote_document_id     UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'received'
+                        CHECK (status IN ('received','under_review','shortlisted','awarded','declined','expired')),
+  notes                 TEXT,
+  received_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  reviewed_at           TIMESTAMPTZ,
+  UNIQUE (rfq_id, supplier_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_rfq_quotes_rfq
+  ON {{BUSINESS}}.rfq_quotes (rfq_id);
+
+ALTER TABLE {{BUSINESS}}.rfqs
+  ADD CONSTRAINT fk_{{BUSINESS}}_rfqs_awarded_quote
+    FOREIGN KEY (awarded_quote_id) REFERENCES {{BUSINESS}}.rfq_quotes (quote_id) ON DELETE SET NULL;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PURCHASE ORDERS — with factory state machine                      ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── purchase_orders ──────────────────────────────────────
+-- The PO header. State machine matches inbound_shipments (in stock
+-- template) — they're linked many-to-many via inbound_shipment_lines.
+CREATE TABLE {{BUSINESS}}.purchase_orders (
+  po_id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  po_number             TEXT        NOT NULL UNIQUE,            -- 'PXG-PO-0001'
+  supplier_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.suppliers (supplier_id),
+  -- Origin
+  rfq_id                UUID        REFERENCES {{BUSINESS}}.rfqs (rfq_id) ON DELETE SET NULL,
+  awarded_quote_id      UUID        REFERENCES {{BUSINESS}}.rfq_quotes (quote_id) ON DELETE SET NULL,
+  -- Header
+  title                 TEXT        NOT NULL,
+  description           TEXT,
+  delivery_location_id  UUID        REFERENCES {{BUSINESS}}.stock_locations (location_id) ON DELETE SET NULL,
+  -- Money
+  po_currency           TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  subtotal              NUMERIC(14,2) NOT NULL DEFAULT 0,
+  tax_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  shipping_amount       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total                 NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- NGN equivalents (locked at PO confirmation)
+  total_ngn             NUMERIC(14,2) NOT NULL DEFAULT 0,
+  fx_rate_used          NUMERIC(15,6) NOT NULL DEFAULT 1.000000,
+  -- Terms
+  payment_terms_days    SMALLINT,
+  expected_delivery     DATE,
+  shipping_terms        TEXT,                                    -- 'FOB China', 'CIF Lagos'
+  -- ── STATE MACHINE (matches inbound_shipments.status one-for-one)
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN (
+                          'draft','submitted','approved',
+                          'in_production',     -- factory has begun
+                          'quality_check',     -- factory QC
+                          'ready_to_ship',
+                          'in_transit',
+                          'arrived_lagos',
+                          'cleared_customs',
+                          'partially_received',
+                          'received',          -- fully received
+                          'closed',
+                          'cancelled'
+                        )),
+  -- Quantities (rolled up from po_lines)
+  total_qty_ordered     INTEGER     NOT NULL DEFAULT 0,
+  total_qty_received    INTEGER     NOT NULL DEFAULT 0,
+  -- Approval
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  -- Cancellation
+  cancelled_at          TIMESTAMPTZ,
+  cancellation_reason   TEXT,
+  -- Documents
+  po_document_id        UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_purchase_orders_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.purchase_orders
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_po_supplier
+  ON {{BUSINESS}}.purchase_orders (supplier_id, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_po_status
+  ON {{BUSINESS}}.purchase_orders (status, expected_delivery);
+CREATE INDEX idx_{{BUSINESS}}_po_open
+  ON {{BUSINESS}}.purchase_orders (expected_delivery)
+  WHERE status NOT IN ('received','closed','cancelled');
+
+ALTER TABLE {{BUSINESS}}.rfqs
+  ADD CONSTRAINT fk_{{BUSINESS}}_rfqs_resulting_po
+    FOREIGN KEY (resulting_po_id) REFERENCES {{BUSINESS}}.purchase_orders (po_id) ON DELETE SET NULL;
+
+-- ── po_lines ─────────────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.po_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  po_id                 UUID        NOT NULL REFERENCES {{BUSINESS}}.purchase_orders (po_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  -- Snapshot
+  description           TEXT        NOT NULL,
+  supplier_sku          TEXT,
+  -- Quantities
+  qty_ordered           INTEGER     NOT NULL CHECK (qty_ordered > 0),
+  qty_received          INTEGER     NOT NULL DEFAULT 0,
+  qty_rejected          INTEGER     NOT NULL DEFAULT 0,
+  qty_outstanding       INTEGER     GENERATED ALWAYS AS (qty_ordered - qty_received - qty_rejected) STORED,
+  -- Pricing in PO currency + NGN
+  unit_price            NUMERIC(14,2) NOT NULL,
+  unit_price_ngn        NUMERIC(14,2) NOT NULL,
+  line_total            NUMERIC(14,2) NOT NULL,
+  line_total_ngn        NUMERIC(14,2) NOT NULL,
+  -- Tax
+  tax_rate              NUMERIC(5,4) NOT NULL DEFAULT 0,
+  tax_amount_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Production linkage (Module 6.24: each PO line may map to a production_run)
+  production_run_id     UUID,                                    -- FK wired in 000025
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_po_lines_po
+  ON {{BUSINESS}}.po_lines (po_id);
+CREATE INDEX idx_{{BUSINESS}}_po_lines_variant
+  ON {{BUSINESS}}.po_lines (variant_id) WHERE variant_id IS NOT NULL;
+
+-- Wire deferred FK on inbound_shipment_lines.po_line_id
+ALTER TABLE {{BUSINESS}}.inbound_shipment_lines
+  ADD CONSTRAINT fk_{{BUSINESS}}_inbound_shipment_lines_po_line
+    FOREIGN KEY (po_line_id) REFERENCES {{BUSINESS}}.po_lines (line_id) ON DELETE SET NULL;
+
+-- ── po_state_history ─────────────────────────────────────
+-- Append-only audit. Drives the customer-facing order timeline
+-- when a PO is linked to a custom sales order (e.g. "Your wig left
+-- the factory" = PO went into 'in_transit').
+CREATE TABLE {{BUSINESS}}.po_state_history (
+  history_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  po_id                 UUID        NOT NULL REFERENCES {{BUSINESS}}.purchase_orders (po_id) ON DELETE CASCADE,
+  from_status           TEXT,
+  to_status             TEXT        NOT NULL,
+  changed_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  changed_by_source     TEXT        NOT NULL DEFAULT 'user'
+                        CHECK (changed_by_source IN ('user','system','webhook')),
+  changed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_po_state_history_po
+  ON {{BUSINESS}}.po_state_history (po_id, changed_at);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ GOODS RECEIVED NOTES                                               ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE {{BUSINESS}}.goods_received_notes (
+  grn_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  grn_number            TEXT        NOT NULL UNIQUE,
+  po_id                 UUID        NOT NULL REFERENCES {{BUSINESS}}.purchase_orders (po_id),
+  -- Linked inbound_shipment (PXG factory deliveries)
+  inbound_shipment_id   UUID        REFERENCES {{BUSINESS}}.inbound_shipments (shipment_id) ON DELETE SET NULL,
+  -- Receipt context
+  received_at_location_id UUID      NOT NULL REFERENCES {{BUSINESS}}.stock_locations (location_id),
+  delivery_note_ref     TEXT,                                    -- supplier's delivery note number
+  received_by           UUID        NOT NULL REFERENCES shared.users (user_id),
+  inspected_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Counts summary
+  total_qty_expected    INTEGER,
+  total_qty_received    INTEGER,
+  total_qty_rejected    INTEGER     NOT NULL DEFAULT 0,
+  rejection_reason      TEXT,
+  -- Documents
+  grn_document_id       UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  delivery_note_doc_id  UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','received','quality_inspection','accepted','partially_accepted','rejected','posted','reversed')),
+  received_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  inspected_at          TIMESTAMPTZ,
+  posted_at             TIMESTAMPTZ,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_grn_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.goods_received_notes
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_grn_po
+  ON {{BUSINESS}}.goods_received_notes (po_id);
+CREATE INDEX idx_{{BUSINESS}}_grn_shipment
+  ON {{BUSINESS}}.goods_received_notes (inbound_shipment_id) WHERE inbound_shipment_id IS NOT NULL;
+
+CREATE TABLE {{BUSINESS}}.grn_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  grn_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.goods_received_notes (grn_id) ON DELETE CASCADE,
+  po_line_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.po_lines (line_id),
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  qty_expected          INTEGER     NOT NULL,
+  qty_received          INTEGER     NOT NULL CHECK (qty_received >= 0),
+  qty_rejected          INTEGER     NOT NULL DEFAULT 0,
+  -- QC findings
+  inspection_result     TEXT        DEFAULT 'pass'
+                        CHECK (inspection_result IN ('pass','partial_pass','fail','pending')),
+  rejection_reason      TEXT,
+  -- Cost capture (the actual unit cost at receipt — may differ from PO if FX moved)
+  unit_cost_ngn         NUMERIC(14,2),
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_grn_lines_grn
+  ON {{BUSINESS}}.grn_lines (grn_id);
+CREATE INDEX idx_{{BUSINESS}}_grn_lines_po_line
+  ON {{BUSINESS}}.grn_lines (po_line_id);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SUPPLIER INVOICES + THREE-WAY MATCHING                             ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE {{BUSINESS}}.supplier_invoices (
+  supplier_invoice_id   UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  invoice_number        TEXT        NOT NULL,                   -- supplier's own number
+  internal_reference    TEXT        NOT NULL UNIQUE,            -- 'PXG-SI-0001'
+  supplier_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.suppliers (supplier_id),
+  po_id                 UUID        REFERENCES {{BUSINESS}}.purchase_orders (po_id) ON DELETE SET NULL,
+  -- Money
+  invoice_currency      TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  subtotal              NUMERIC(14,2) NOT NULL,
+  tax_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  wht_amount            NUMERIC(14,2) NOT NULL DEFAULT 0,
+  shipping              NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total                 NUMERIC(14,2) NOT NULL,
+  total_ngn             NUMERIC(14,2) NOT NULL,
+  fx_rate_used          NUMERIC(15,6) NOT NULL DEFAULT 1.000000,
+  -- Dates
+  invoice_date          DATE        NOT NULL,
+  due_date              DATE        NOT NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'received'
+                        CHECK (status IN ('received','matching','matched','approved','partially_paid','paid','disputed','void')),
+  match_status          TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (match_status IN ('pending','matched','quantity_mismatch','price_mismatch','no_grn','disputed','overridden')),
+  -- Payment
+  amount_paid_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  balance_due_ngn       NUMERIC(14,2) GENERATED ALWAYS AS (total_ngn - amount_paid_ngn) STORED,
+  -- Documents
+  invoice_document_id   UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Journal posting
+  journal_entry_id      UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  -- Audit
+  received_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (supplier_id, invoice_number)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_supplier_invoices_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.supplier_invoices
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_supplier_invoices_supplier
+  ON {{BUSINESS}}.supplier_invoices (supplier_id, invoice_date DESC);
+CREATE INDEX idx_{{BUSINESS}}_supplier_invoices_po
+  ON {{BUSINESS}}.supplier_invoices (po_id) WHERE po_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_supplier_invoices_due
+  ON {{BUSINESS}}.supplier_invoices (due_date)
+  WHERE status NOT IN ('paid','void');
+CREATE INDEX idx_{{BUSINESS}}_supplier_invoices_status
+  ON {{BUSINESS}}.supplier_invoices (status, due_date);
+
+CREATE TABLE {{BUSINESS}}.supplier_invoice_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_invoice_id   UUID        NOT NULL REFERENCES {{BUSINESS}}.supplier_invoices (supplier_invoice_id) ON DELETE CASCADE,
+  po_line_id            UUID        REFERENCES {{BUSINESS}}.po_lines (line_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              NUMERIC(12,3) NOT NULL CHECK (quantity > 0),
+  unit_price            NUMERIC(14,2) NOT NULL,
+  line_total            NUMERIC(14,2) NOT NULL,
+  line_total_ngn        NUMERIC(14,2) NOT NULL,
+  -- GL account (set during match)
+  account_id            UUID        REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE SET NULL,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_supplier_invoice_lines_invoice
+  ON {{BUSINESS}}.supplier_invoice_lines (supplier_invoice_id);
+
+-- ── supplier_invoice_matches ─────────────────────────────
+-- Three-way matching: PO line + GRN line + supplier invoice line.
+-- Computed by the matching service; a row per matched triple.
+CREATE TABLE {{BUSINESS}}.supplier_invoice_matches (
+  match_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  supplier_invoice_id   UUID        NOT NULL REFERENCES {{BUSINESS}}.supplier_invoices (supplier_invoice_id) ON DELETE CASCADE,
+  supplier_invoice_line_id UUID     NOT NULL REFERENCES {{BUSINESS}}.supplier_invoice_lines (line_id) ON DELETE CASCADE,
+  po_line_id            UUID        REFERENCES {{BUSINESS}}.po_lines (line_id) ON DELETE SET NULL,
+  grn_line_id           UUID        REFERENCES {{BUSINESS}}.grn_lines (line_id) ON DELETE SET NULL,
+  -- Match quality
+  quantity_match        BOOLEAN     NOT NULL,
+  price_match           BOOLEAN     NOT NULL,
+  match_status          TEXT        NOT NULL
+                        CHECK (match_status IN ('matched','quantity_variance','price_variance','no_grn','overridden')),
+  variance_ngn          NUMERIC(14,2),
+  override_approved_by  UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  override_reason       TEXT,
+  matched_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_si_matches_invoice
+  ON {{BUSINESS}}.supplier_invoice_matches (supplier_invoice_id);
+
+-- ============================================================
+-- After 000016..023+024: 80 + 14 = 94 tables
+-- ============================================================

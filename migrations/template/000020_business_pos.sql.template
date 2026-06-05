@@ -1,0 +1,300 @@
+-- ============================================================
+-- TEMPLATE 000020 — Per-business POS
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.3 — Point of Sale.
+--
+-- Each location is set up as a named terminal. Staff log in with a
+-- personal PIN for accountability. Payments via Paystack, Strive
+-- Connect, and Nomba (bank transfers + POS card payments default).
+-- Split payments handled cleanly. PIN-based login links each sale
+-- to a staff member for commissions.
+--
+-- Tables:
+--   pos_terminals             — physical/logical POS endpoints
+--   pos_pin_credentials       — staff PIN (separate from app password)
+--   pos_sessions              — staff shift on a terminal
+--   pos_transactions          — checkout events (walk-in and dispatch from POS)
+--   pos_transaction_lines     — line items
+--   pos_payment_splits        — split payments per transaction
+--   pos_cash_drops            — mid-session cash drops to safe
+--   pos_void_log              — voided line items / transactions
+--   pos_session_summary       — end-of-shift snapshot
+-- ============================================================
+
+-- ── pos_terminals ────────────────────────────────────────
+-- A POS terminal is the named station staff log in to. It maps to a
+-- physical device (tablet) at a stock_location. Sales attribute to
+-- this terminal for end-of-day reconciliation.
+CREATE TABLE {{BUSINESS}}.pos_terminals (
+  terminal_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  terminal_code         TEXT        NOT NULL UNIQUE,            -- 'PXG-TERM-LAG-01'
+  display_name          TEXT        NOT NULL,                   -- 'Lekki Showroom — Front Desk'
+  location_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.stock_locations (location_id),
+  -- Default stock location used for sales (often same as terminal location,
+  -- but may differ if the showroom holds zero inventory and ships from warehouse).
+  default_sell_location_id UUID     REFERENCES {{BUSINESS}}.stock_locations (location_id),
+  -- Hardware
+  device_fingerprint    TEXT,                                    -- browser/PWA fingerprint of the assigned tablet
+  printer_endpoint      TEXT,                                    -- network printer (receipts)
+  -- Payment processor terminal IDs
+  nomba_terminal_id     TEXT,                                    -- Nomba POS card terminal
+  paystack_terminal_id  TEXT,
+  -- Operational
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  is_offline_capable    BOOLEAN     NOT NULL DEFAULT true,      -- per spec — PWA offline-first
+  -- Cash float
+  opening_cash_float_ngn NUMERIC(12,2) NOT NULL DEFAULT 0,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pos_terminals_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pos_terminals
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_pos_terminals_location
+  ON {{BUSINESS}}.pos_terminals (location_id) WHERE is_active = true;
+
+-- ── pos_pin_credentials ──────────────────────────────────
+-- 4-digit PIN per staff member for POS-only login. SEPARATE from
+-- the staff password hash. PINs are bcrypt-hashed too, never
+-- plaintext. Locked-out after 5 wrong attempts for 30 min.
+CREATE TABLE {{BUSINESS}}.pos_pin_credentials (
+  credential_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id               UUID        NOT NULL UNIQUE REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  pin_hash              TEXT        NOT NULL,                   -- bcrypt cost 10 (PINs short, lower cost OK)
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  must_change_pin       BOOLEAN     NOT NULL DEFAULT true,
+  -- Lockout
+  failed_attempts       SMALLINT    NOT NULL DEFAULT 0,
+  locked_until          TIMESTAMPTZ,
+  last_used_at          TIMESTAMPTZ,
+  -- PIN rotation
+  changed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at            TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pos_pin_credentials_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pos_pin_credentials
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── pos_sessions ─────────────────────────────────────────
+-- A staff member's shift on a specific terminal. Opens with a cash
+-- float, closes with a count and reconciliation. Every pos_transaction
+-- belongs to a session.
+CREATE TABLE {{BUSINESS}}.pos_sessions (
+  session_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_number        TEXT        NOT NULL UNIQUE,            -- 'PXG-SESS-0001'
+  terminal_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.pos_terminals (terminal_id),
+  staff_user_id         UUID        NOT NULL REFERENCES shared.users (user_id),
+  -- Cash
+  opening_cash_ngn      NUMERIC(12,2) NOT NULL DEFAULT 0,
+  closing_cash_declared NUMERIC(12,2),                          -- what staff counted at close
+  closing_cash_expected NUMERIC(12,2),                          -- system's expectation
+  cash_variance_ngn     NUMERIC(12,2),                          -- declared - expected
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open','closing','closed','reconciled','disputed')),
+  opened_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at             TIMESTAMPTZ,
+  reconciled_at         TIMESTAMPTZ,
+  reconciled_by         UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Discrepancy note (required if cash_variance != 0)
+  variance_explanation  TEXT,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pos_sessions_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pos_sessions
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_pos_sessions_terminal
+  ON {{BUSINESS}}.pos_sessions (terminal_id, opened_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_pos_sessions_staff
+  ON {{BUSINESS}}.pos_sessions (staff_user_id, opened_at DESC);
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_pos_sessions_open_per_terminal
+  ON {{BUSINESS}}.pos_sessions (terminal_id) WHERE status = 'open';
+
+-- ── pos_transactions ─────────────────────────────────────
+-- A checkout event at a POS terminal. Always linked to a sales_order
+-- (POS creates a sales_order with sales_channel='pos'). This table
+-- holds POS-specific context (session, terminal, walk-in/dispatch
+-- choice, on-screen UX state).
+CREATE TABLE {{BUSINESS}}.pos_transactions (
+  transaction_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  transaction_number    TEXT        NOT NULL UNIQUE,            -- 'PXG-POS-0001'
+  -- The canonical order (created in tandem)
+  order_id              UUID        NOT NULL REFERENCES {{BUSINESS}}.sales_orders (order_id),
+  -- Context
+  session_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.pos_sessions (session_id),
+  terminal_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.pos_terminals (terminal_id),
+  cashier_user_id       UUID        NOT NULL REFERENCES shared.users (user_id),
+  -- Customer (optional — walk-ins may be anonymous)
+  customer_contact_id   UUID        REFERENCES shared.contacts (contact_id) ON DELETE SET NULL,
+  -- Walk-in vs Dispatch (mirrors sales_orders.order_type but
+  -- duplicated here for fast POS reporting)
+  is_walk_in            BOOLEAN     NOT NULL DEFAULT true,
+  -- Money summary (NGN; the cashier sees the customer's currency on screen)
+  subtotal_ngn          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  discount_total_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  tax_total_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_ngn             NUMERIC(14,2) NOT NULL,
+  -- Payment summary (rolled from pos_payment_splits)
+  cash_received_ngn     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  cash_returned_ngn     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  card_received_ngn     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  transfer_received_ngn NUMERIC(12,2) NOT NULL DEFAULT 0,
+  points_redeemed_ngn   NUMERIC(12,2) NOT NULL DEFAULT 0,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','completed','voided','refunded','partial_refund')),
+  voided_at             TIMESTAMPTZ,
+  voided_by             UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  void_reason           TEXT,
+  -- Receipt
+  receipt_printed       BOOLEAN     NOT NULL DEFAULT false,
+  receipt_emailed_to    CITEXT,
+  receipt_whatsapp_to   TEXT,
+  -- Offline-mode marker (V2 spec: terminal works offline; this flag
+  -- says "this row was created while offline and synced later")
+  was_offline           BOOLEAN     NOT NULL DEFAULT false,
+  offline_synced_at     TIMESTAMPTZ,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pos_transactions_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pos_transactions
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_pos_transactions_session
+  ON {{BUSINESS}}.pos_transactions (session_id, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_pos_transactions_cashier
+  ON {{BUSINESS}}.pos_transactions (cashier_user_id, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_pos_transactions_terminal_day
+  ON {{BUSINESS}}.pos_transactions (terminal_id, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_pos_transactions_offline_unsynced
+  ON {{BUSINESS}}.pos_transactions (created_at)
+  WHERE was_offline = true AND offline_synced_at IS NULL;
+
+-- Wire deferred FKs on sales_orders → pos_terminals/pos_sessions
+ALTER TABLE {{BUSINESS}}.sales_orders
+  ADD CONSTRAINT fk_{{BUSINESS}}_sales_orders_pos_terminal
+    FOREIGN KEY (pos_terminal_id) REFERENCES {{BUSINESS}}.pos_terminals (terminal_id) ON DELETE SET NULL,
+  ADD CONSTRAINT fk_{{BUSINESS}}_sales_orders_pos_session
+    FOREIGN KEY (pos_session_id) REFERENCES {{BUSINESS}}.pos_sessions (session_id) ON DELETE SET NULL;
+
+-- ── pos_payment_splits ───────────────────────────────────
+-- Split payments are first-class: one transaction may be paid 50%
+-- transfer + 30% card + 20% cash. Each split is its own row,
+-- mirroring an entry in sales_order_payments.
+CREATE TABLE {{BUSINESS}}.pos_payment_splits (
+  split_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  transaction_id        UUID        NOT NULL REFERENCES {{BUSINESS}}.pos_transactions (transaction_id) ON DELETE CASCADE,
+  -- Mirror of sales_order_payments
+  sales_order_payment_id UUID       REFERENCES {{BUSINESS}}.sales_order_payments (payment_id) ON DELETE SET NULL,
+  method                TEXT        NOT NULL
+                        CHECK (method IN ('cash','paystack_card','paystack_transfer','strive_connect',
+                                          'nomba_terminal','bank_transfer','points','wallet','voucher')),
+  amount_ngn            NUMERIC(14,2) NOT NULL CHECK (amount_ngn > 0),
+  -- For card / transfer
+  provider_reference    TEXT,
+  approval_code         TEXT,                                    -- Nomba/Paystack auth code
+  card_last4            CHAR(4),
+  -- Cash specifics
+  cash_tendered_ngn     NUMERIC(12,2),                           -- what customer handed over
+  cash_returned_ngn     NUMERIC(12,2),                           -- change
+  status                TEXT        NOT NULL DEFAULT 'completed'
+                        CHECK (status IN ('completed','failed','reversed','pending')),
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_pos_payment_splits_transaction
+  ON {{BUSINESS}}.pos_payment_splits (transaction_id);
+CREATE INDEX idx_{{BUSINESS}}_pos_payment_splits_method
+  ON {{BUSINESS}}.pos_payment_splits (method, recorded_at DESC);
+
+-- ── pos_cash_drops ───────────────────────────────────────
+-- Mid-session cash transfers from drawer to safe — needed when
+-- a session collects more cash than is safe to hold. Each drop is
+-- audited and counts toward session reconciliation.
+CREATE TABLE {{BUSINESS}}.pos_cash_drops (
+  drop_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  drop_number           TEXT        NOT NULL UNIQUE,            -- 'PXG-DROP-0001'
+  session_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.pos_sessions (session_id),
+  amount_ngn            NUMERIC(12,2) NOT NULL CHECK (amount_ngn > 0),
+  reason                TEXT,                                    -- 'safe_drop','float_out','cash_payment_to_supplier'
+  performed_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  witnessed_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  destination           TEXT,                                    -- 'safe','manager_office','bank_deposit'
+  bank_deposit_reference TEXT,
+  performed_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_pos_cash_drops_session
+  ON {{BUSINESS}}.pos_cash_drops (session_id, performed_at);
+
+-- ── pos_void_log ─────────────────────────────────────────
+-- Every void is recorded for audit. Pre-payment voids are normal;
+-- post-payment voids require manager PIN (workflow_definition).
+CREATE TABLE {{BUSINESS}}.pos_void_log (
+  void_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  transaction_id        UUID        NOT NULL REFERENCES {{BUSINESS}}.pos_transactions (transaction_id),
+  -- 'line_void' = voided one line; 'full_void' = voided entire transaction
+  void_type             TEXT        NOT NULL CHECK (void_type IN ('line_void','full_void','refund')),
+  voided_line_id        UUID        REFERENCES {{BUSINESS}}.sales_order_lines (line_id) ON DELETE SET NULL,
+  amount_ngn            NUMERIC(14,2) NOT NULL,
+  reason                TEXT        NOT NULL,
+  performed_by          UUID        NOT NULL REFERENCES shared.users (user_id),
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  performed_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_pos_void_log_transaction
+  ON {{BUSINESS}}.pos_void_log (transaction_id);
+CREATE INDEX idx_{{BUSINESS}}_pos_void_log_performed_by
+  ON {{BUSINESS}}.pos_void_log (performed_by, performed_at DESC);
+
+-- ── pos_session_summary ──────────────────────────────────
+-- End-of-shift snapshot (X / Z report). Generated when session is
+-- closed. Comprehensive — supports the reconciliation review and
+-- manager sign-off.
+CREATE TABLE {{BUSINESS}}.pos_session_summary (
+  summary_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id            UUID        NOT NULL UNIQUE REFERENCES {{BUSINESS}}.pos_sessions (session_id) ON DELETE CASCADE,
+  -- Transaction counts
+  total_transactions    INTEGER     NOT NULL DEFAULT 0,
+  walk_in_transactions  INTEGER     NOT NULL DEFAULT 0,
+  dispatch_transactions INTEGER     NOT NULL DEFAULT 0,
+  void_transactions     INTEGER     NOT NULL DEFAULT 0,
+  refund_transactions   INTEGER     NOT NULL DEFAULT 0,
+  -- Revenue (NGN)
+  gross_sales_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  discounts_given_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  tax_collected_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  net_sales_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Payment method breakdown
+  cash_collected_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  card_collected_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  transfer_collected_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  points_redeemed_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  other_collected_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Cash reconciliation
+  opening_float_ngn     NUMERIC(12,2) NOT NULL DEFAULT 0,
+  cash_drops_total_ngn  NUMERIC(12,2) NOT NULL DEFAULT 0,
+  expected_in_drawer    NUMERIC(12,2),                          -- opening + cash_collected - drops - change
+  declared_in_drawer    NUMERIC(12,2),
+  variance_ngn          NUMERIC(12,2),
+  -- Loyalty
+  loyalty_points_earned INTEGER     NOT NULL DEFAULT 0,
+  loyalty_points_redeemed INTEGER   NOT NULL DEFAULT 0,
+  -- Unique customers served
+  unique_customers      INTEGER     NOT NULL DEFAULT 0,
+  -- Report document
+  z_report_document_id  UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  generated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- Verify after 000016+017+018+019+020:
+--   45 + 9 (POS) = 54 tables
+-- ============================================================

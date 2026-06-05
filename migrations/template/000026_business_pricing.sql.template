@@ -1,0 +1,328 @@
+-- ============================================================
+-- TEMPLATE 000026 — Per-business pricing engine
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.25 — Pricing Engine.
+--
+-- Goal-seek + sensitivity. CEO-approved price changes feed back into
+-- product_variants.price_*_ngn. The engine enforces:
+--   - per-channel pricing (storefront / POS / wholesale / partner)
+--   - intercompany min-margin floor (Flow-2 wholesale)
+--   - charm rounding (e.g. ₦XX,999)
+--   - PXG quantity discount as a selling-cost layer
+--
+-- Tables:
+--   pricing_rules            — declarative rules per product / variant / channel
+--   pricing_floors           — hard min-margin / min-price floors
+--   pricing_scenarios        — saved what-if analyses
+--   pricing_scenario_results — per-variant outputs for a scenario
+--   pricing_scenario_sliders — the sliders the user moved (FX/freight/etc.)
+--   price_proposals          — proposed price changes awaiting CEO approval
+--   price_history            — every price change ever (audit)
+--   channel_price_overrides  — manual channel-specific overrides
+--   cost_pass_through_rules  — charm rounding, quantity discount layers
+-- ============================================================
+
+-- ── pricing_rules ────────────────────────────────────────
+-- Declarative rules. Pricing service evaluates these in order. A rule
+-- can target a category, product, variant, or be global (all).
+CREATE TABLE {{BUSINESS}}.pricing_rules (
+  rule_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_name             TEXT        NOT NULL,
+  description           TEXT,
+  -- Scope (XOR — one of category / product / variant set OR global)
+  category_id           UUID        REFERENCES {{BUSINESS}}.product_categories (category_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  -- Channel scope
+  channel               TEXT        NOT NULL DEFAULT 'storefront'
+                        CHECK (channel IN ('storefront','pos','wholesale','partner','intercompany','all')),
+  -- Rule type
+  rule_type             TEXT        NOT NULL
+                        CHECK (rule_type IN (
+                          'markup_pct',         -- multiplier over cost
+                          'target_margin_pct',  -- goal-seek
+                          'fixed_price',
+                          'discount_pct',       -- discount off list
+                          'min_price',          -- floor
+                          'cost_pass_through',  -- cost + fees + rounding
+                          'tiered_quantity'     -- discount steps for qty
+                        )),
+  rule_value            NUMERIC(12,4),                          -- the number (% or ₦)
+  rule_config           JSONB       NOT NULL DEFAULT '{}'::jsonb, -- complex configs
+  -- Currency (rule applies when display currency matches; NULL = all)
+  applies_to_currency   TEXT        REFERENCES shared.currencies (currency_code),
+  -- Priority (lower = higher priority)
+  priority              SMALLINT    NOT NULL DEFAULT 100,
+  -- Validity
+  valid_from            DATE        NOT NULL DEFAULT CURRENT_DATE,
+  valid_to              DATE,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pricing_rules_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pricing_rules
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_pricing_rules_channel
+  ON {{BUSINESS}}.pricing_rules (channel, priority) WHERE is_active = true;
+CREATE INDEX idx_{{BUSINESS}}_pricing_rules_product
+  ON {{BUSINESS}}.pricing_rules (product_id) WHERE product_id IS NOT NULL AND is_active = true;
+CREATE INDEX idx_{{BUSINESS}}_pricing_rules_variant
+  ON {{BUSINESS}}.pricing_rules (variant_id) WHERE variant_id IS NOT NULL AND is_active = true;
+
+-- ── pricing_floors ───────────────────────────────────────
+-- Hard floors — never sell below this margin or this absolute price.
+-- Used for intercompany Flow-2 (PXG→FLH wholesale min-margin) and
+-- for general margin protection.
+CREATE TABLE {{BUSINESS}}.pricing_floors (
+  floor_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  category_id           UUID        REFERENCES {{BUSINESS}}.product_categories (category_id) ON DELETE CASCADE,
+  channel               TEXT        NOT NULL DEFAULT 'all',
+  floor_type            TEXT        NOT NULL
+                        CHECK (floor_type IN ('min_price_ngn','min_margin_pct','min_markup_pct')),
+  floor_value           NUMERIC(12,4) NOT NULL,
+  reason                TEXT,
+  -- Source of truth (e.g. business_config.intercompany_settings.min_margin_floor_pct)
+  is_intercompany_floor BOOLEAN     NOT NULL DEFAULT false,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  set_by                UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  set_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at            TIMESTAMPTZ
+);
+CREATE INDEX idx_{{BUSINESS}}_pricing_floors_variant
+  ON {{BUSINESS}}.pricing_floors (variant_id, channel) WHERE is_active = true;
+
+-- ── pricing_scenarios ────────────────────────────────────
+-- A saved what-if. Multiple scenarios can be open at once for
+-- side-by-side comparison.
+CREATE TABLE {{BUSINESS}}.pricing_scenarios (
+  scenario_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  scenario_name         TEXT        NOT NULL,
+  description           TEXT,
+  -- Scope
+  scope_type            TEXT        NOT NULL DEFAULT 'specific_variants'
+                        CHECK (scope_type IN ('all_active','category','specific_products','specific_variants')),
+  category_ids          UUID[]      NOT NULL DEFAULT '{}',
+  variant_ids           UUID[]      NOT NULL DEFAULT '{}',
+  -- Goal
+  goal_type             TEXT        NOT NULL
+                        CHECK (goal_type IN ('target_margin','target_price','target_revenue','sensitivity_only')),
+  goal_value            NUMERIC(12,4),
+  goal_currency         TEXT        REFERENCES shared.currencies (currency_code),
+  -- Channel for analysis
+  channel               TEXT        NOT NULL DEFAULT 'storefront',
+  -- Volume assumption
+  assumed_monthly_units INTEGER,
+  -- Cost basis used (snapshot)
+  cost_basis            TEXT        NOT NULL DEFAULT 'latest'
+                        CHECK (cost_basis IN ('latest','average','last_run','custom')),
+  custom_cost_ngn       NUMERIC(14,2),
+  -- Aggregated outputs
+  computed_units_analysed INTEGER,
+  computed_avg_new_price_ngn NUMERIC(14,2),
+  computed_avg_margin_pct   NUMERIC(7,4),
+  computed_projected_revenue_ngn NUMERIC(14,2),
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','computed','proposed','approved','rejected','applied','archived')),
+  -- Linked price proposal if scenario was promoted
+  price_proposal_id     UUID,                                    -- FK wired below
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  computed_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pricing_scenarios_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pricing_scenarios
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_pricing_scenarios_status
+  ON {{BUSINESS}}.pricing_scenarios (status, created_at DESC);
+
+-- ── pricing_scenario_sliders ─────────────────────────────
+-- The "moves" the user made — each slider's before/after value. Drives
+-- the sensitivity table (e.g. "10% FX shift → 5% margin impact").
+CREATE TABLE {{BUSINESS}}.pricing_scenario_sliders (
+  slider_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  scenario_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.pricing_scenarios (scenario_id) ON DELETE CASCADE,
+  slider_key            TEXT        NOT NULL,
+  -- Keys: 'fx_rate','freight_per_unit','styling_cost','wastage_pct',
+  --       'payment_processor_fee_pct','customs_pct','target_margin_pct',
+  --       'discount_pct','quantity_threshold'
+  baseline_value        NUMERIC(15,6) NOT NULL,
+  scenario_value        NUMERIC(15,6) NOT NULL,
+  delta_pct             NUMERIC(7,4) GENERATED ALWAYS AS (
+    CASE WHEN baseline_value <> 0 THEN ((scenario_value - baseline_value) / baseline_value * 100)
+         ELSE NULL END
+  ) STORED,
+  notes                 TEXT,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_pricing_sliders_scenario
+  ON {{BUSINESS}}.pricing_scenario_sliders (scenario_id);
+
+-- ── pricing_scenario_results ─────────────────────────────
+-- Per-variant output. One row per variant in scope.
+CREATE TABLE {{BUSINESS}}.pricing_scenario_results (
+  result_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  scenario_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.pricing_scenarios (scenario_id) ON DELETE CASCADE,
+  variant_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.product_variants (variant_id),
+  -- Cost inputs (snapshot)
+  cost_ngn              NUMERIC(14,2) NOT NULL,
+  -- Current state
+  current_price_ngn     NUMERIC(14,2),
+  current_margin_pct    NUMERIC(7,4),
+  -- Proposed
+  proposed_price_ngn    NUMERIC(14,2) NOT NULL,
+  proposed_margin_pct   NUMERIC(7,4) NOT NULL,
+  proposed_markup_pct   NUMERIC(7,4),
+  -- Display currency snapshot
+  proposed_display_currency TEXT    REFERENCES shared.currencies (currency_code),
+  proposed_display_price NUMERIC(14,2),
+  -- Sensitivity
+  margin_at_cost_minus_10 NUMERIC(7,4),
+  margin_at_cost_plus_10  NUMERIC(7,4),
+  margin_at_fx_minus_10   NUMERIC(7,4),
+  margin_at_fx_plus_10    NUMERIC(7,4),
+  -- Floor compliance check
+  floor_breached        BOOLEAN     NOT NULL DEFAULT false,
+  floor_breach_notes    TEXT,
+  -- Projected impact
+  projected_monthly_units INTEGER,
+  projected_monthly_revenue_ngn NUMERIC(14,2)
+);
+CREATE INDEX idx_{{BUSINESS}}_pricing_results_scenario
+  ON {{BUSINESS}}.pricing_scenario_results (scenario_id);
+CREATE INDEX idx_{{BUSINESS}}_pricing_results_variant
+  ON {{BUSINESS}}.pricing_scenario_results (variant_id);
+
+-- ── price_proposals ──────────────────────────────────────
+-- A scenario promoted to a CEO-approval request. On approval, the
+-- engine writes the new prices to product_variants and creates
+-- price_history rows.
+CREATE TABLE {{BUSINESS}}.price_proposals (
+  proposal_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  proposal_number       TEXT        NOT NULL UNIQUE,            -- 'PXG-PRP-0001'
+  scenario_id           UUID        REFERENCES {{BUSINESS}}.pricing_scenarios (scenario_id) ON DELETE SET NULL,
+  title                 TEXT        NOT NULL,
+  description           TEXT,
+  -- Application date
+  effective_from        DATE        NOT NULL DEFAULT CURRENT_DATE,
+  effective_to          DATE,
+  -- Variants affected (snapshot count for display)
+  variants_count        INTEGER     NOT NULL DEFAULT 0,
+  -- Workflow
+  status                TEXT        NOT NULL DEFAULT 'pending_approval'
+                        CHECK (status IN ('draft','pending_approval','approved','rejected','applied','reverted','expired')),
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  submitted_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  submitted_at          TIMESTAMPTZ,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  rejected_at           TIMESTAMPTZ,
+  rejection_reason      TEXT,
+  applied_at            TIMESTAMPTZ,
+  reverted_at           TIMESTAMPTZ,
+  reversion_reason      TEXT,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_price_proposals_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.price_proposals
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_price_proposals_status
+  ON {{BUSINESS}}.price_proposals (status, created_at DESC);
+
+ALTER TABLE {{BUSINESS}}.pricing_scenarios
+  ADD CONSTRAINT fk_{{BUSINESS}}_pricing_scenarios_proposal
+    FOREIGN KEY (price_proposal_id) REFERENCES {{BUSINESS}}.price_proposals (proposal_id) ON DELETE SET NULL;
+
+-- ── price_history ────────────────────────────────────────
+-- Every price change on every variant. Append-only audit. Powers
+-- "show me how much this product has changed price in the last year".
+CREATE TABLE {{BUSINESS}}.price_history (
+  history_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  variant_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  channel               TEXT        NOT NULL CHECK (channel IN ('storefront','pos','wholesale','partner','intercompany')),
+  -- Old vs new
+  old_price_ngn         NUMERIC(14,2),
+  new_price_ngn         NUMERIC(14,2) NOT NULL,
+  delta_pct             NUMERIC(7,4),
+  -- Cost basis at change
+  cost_at_change_ngn    NUMERIC(14,2),
+  margin_at_change_pct  NUMERIC(7,4),
+  -- Source of the change
+  source                TEXT        NOT NULL
+                        CHECK (source IN ('manual','price_proposal','scenario','rule_recalc','bulk_import','migration')),
+  proposal_id           UUID        REFERENCES {{BUSINESS}}.price_proposals (proposal_id) ON DELETE SET NULL,
+  -- Audit
+  effective_from        TIMESTAMPTZ NOT NULL,
+  changed_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_price_history_variant
+  ON {{BUSINESS}}.price_history (variant_id, effective_from DESC);
+CREATE INDEX idx_{{BUSINESS}}_price_history_channel
+  ON {{BUSINESS}}.price_history (channel, effective_from DESC);
+
+-- ── channel_price_overrides ──────────────────────────────
+-- One-off manual overrides per channel (e.g. "this product is sold
+-- at this fixed price on Instagram for the next 2 weeks").
+CREATE TABLE {{BUSINESS}}.channel_price_overrides (
+  override_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  variant_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  channel               TEXT        NOT NULL CHECK (channel IN ('storefront','pos','wholesale','partner','intercompany','instagram')),
+  override_price_ngn    NUMERIC(14,2) NOT NULL,
+  reason                TEXT        NOT NULL,
+  effective_from        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  effective_to          TIMESTAMPTZ,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_channel_overrides_variant
+  ON {{BUSINESS}}.channel_price_overrides (variant_id, channel)
+  WHERE is_active = true;
+
+-- ── cost_pass_through_rules ──────────────────────────────
+-- The deterministic layers applied after the engine computes the
+-- raw target price: charm rounding, quantity-discount layer (PXG
+-- $10/$22 off), service fees added, etc. Each rule is one layer.
+CREATE TABLE {{BUSINESS}}.cost_pass_through_rules (
+  rule_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_name             TEXT        NOT NULL,
+  description           TEXT,
+  layer_type            TEXT        NOT NULL
+                        CHECK (layer_type IN ('charm_rounding','quantity_discount','payment_fee_pass',
+                                              'courier_fee_pass','currency_rounding','custom')),
+  -- Configuration depends on layer_type
+  config                JSONB       NOT NULL,
+  -- Scope
+  channel               TEXT        NOT NULL DEFAULT 'all',
+  applies_to_currency   TEXT        REFERENCES shared.currencies (currency_code),
+  -- Order of application (lower = applied first)
+  apply_order           SMALLINT    NOT NULL DEFAULT 100,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_cost_pass_through_rules_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.cost_pass_through_rules
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_cost_pass_through_active
+  ON {{BUSINESS}}.cost_pass_through_rules (channel, apply_order)
+  WHERE is_active = true;
+
+-- ============================================================
+-- After 000016..025+026: 105 + 9 = 114 tables
+-- ============================================================

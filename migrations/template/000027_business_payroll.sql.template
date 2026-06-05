@@ -1,0 +1,533 @@
+-- ============================================================
+-- TEMPLATE 000027 — Per-business payroll + performance appraisal
+-- Pixie Girl Hub · JBS Praxis · V2.0  (with V2.2 additions)
+--
+-- Module 6.11 — HR & Payroll.
+--
+-- Payroll runs monthly with PAYE / Pension / NHF / NSITF deductions.
+-- Commissions track sale_channel (V2.2: Instagram/Website/WhatsApp/
+-- Walk-in). Bonuses include the V2.2 weighted performance appraisal:
+-- Customer Feedback 40% / Sales Conversion 25% / Work Quality 20% /
+-- Cleanliness 15% → 4.8+ triggers customer-rating bonus; quarterly
+-- and recognition bonuses also tracked.
+--
+-- Tables:
+--   commission_rules                    — per-role / per-product commission %
+--   commission_earned                   — per-sale commission record (with sale_channel!)
+--   bonus_rules                         — bonus type definitions
+--   bonuses_awarded                     — granted bonuses
+--   performance_cycles                  — appraisal periods (quarterly)
+--   performance_kpi_definitions         — the 4 weighted KPIs (40/25/20/15)
+--   performance_scores                  — per-staff per-cycle scores
+--   performance_reviews                 — written reviews + acknowledgement
+--   bonus_triggers                      — auto-trigger rules (4.8+, quarterly, etc.)
+--   payroll_runs                        — monthly run header
+--   payslips                            — per-staff slip
+--   payslip_lines                       — earnings + deductions
+--   payroll_deductions                  — tax tables (PAYE / Pension / NHF)
+-- ============================================================
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ COMMISSIONS                                                        ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── commission_rules ─────────────────────────────────────
+-- Who earns commission, on what, at what rate. Multiple rules may
+-- apply to a single sale; the engine picks the most specific.
+CREATE TABLE {{BUSINESS}}.commission_rules (
+  rule_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_name             TEXT        NOT NULL,
+  description           TEXT,
+  -- Who: role-based OR specific-user
+  applies_to_role_id    UUID        REFERENCES shared.roles (role_id) ON DELETE CASCADE,
+  applies_to_user_id    UUID        REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  -- What: category / product / variant / channel scope
+  category_id           UUID        REFERENCES {{BUSINESS}}.product_categories (category_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  sales_channel         TEXT,                                    -- specific channel or NULL=all
+  -- Calculation
+  calculation_basis     TEXT        NOT NULL
+                        CHECK (calculation_basis IN ('gross_revenue','net_revenue','margin','units')),
+  rate_pct              NUMERIC(7,4),                            -- e.g. 0.05 = 5%
+  rate_fixed_ngn        NUMERIC(12,2),                           -- e.g. ₦500 per unit
+  -- Tiered config (e.g. 3% to 1M, 5% above)
+  tiered_config         JSONB,
+  -- Caps
+  min_commission_ngn    NUMERIC(12,2),
+  max_commission_ngn    NUMERIC(12,2),
+  -- Validity
+  valid_from            DATE        NOT NULL DEFAULT CURRENT_DATE,
+  valid_to              DATE,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  priority              SMALLINT    NOT NULL DEFAULT 100,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_commission_rules_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.commission_rules
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_commission_rules_active
+  ON {{BUSINESS}}.commission_rules (priority) WHERE is_active = true;
+
+-- ── commission_earned ────────────────────────────────────
+-- One row per commissionable sale event. Computed at sale time;
+-- accrued until the next payroll run pays it out.
+--
+-- V2.2 §6.11: sale_channel is FIRST-CLASS here — Instagram, Website,
+-- WhatsApp, Walk-in. This drives Faitlyn's "commission attributed by
+-- where the sale came from" feature.
+CREATE TABLE {{BUSINESS}}.commission_earned (
+  earning_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  earning_number        TEXT        NOT NULL UNIQUE,            -- 'PXG-COM-0001'
+  -- Who earned it
+  user_id               UUID        NOT NULL REFERENCES shared.users (user_id),
+  -- Source: the sale
+  order_id              UUID        REFERENCES {{BUSINESS}}.sales_orders (order_id) ON DELETE SET NULL,
+  order_line_id         UUID        REFERENCES {{BUSINESS}}.sales_order_lines (line_id) ON DELETE SET NULL,
+  invoice_id            UUID        REFERENCES {{BUSINESS}}.invoices (invoice_id) ON DELETE SET NULL,
+  -- ─── V2.2 §6.11: sale channel ───
+  sale_channel          TEXT        NOT NULL
+                        CHECK (sale_channel IN ('instagram','website','whatsapp','walk_in','pos',
+                                                'facebook','tiktok','phone','event','partner','other')),
+  -- Rule applied
+  commission_rule_id    UUID        REFERENCES {{BUSINESS}}.commission_rules (rule_id) ON DELETE SET NULL,
+  -- Calc snapshot
+  basis_amount_ngn      NUMERIC(14,2) NOT NULL,                  -- revenue / margin etc.
+  rate_pct              NUMERIC(7,4),
+  rate_fixed_ngn        NUMERIC(12,2),
+  commission_amount_ngn NUMERIC(14,2) NOT NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'accrued'
+                        CHECK (status IN ('accrued','approved','paid','reversed','disputed','cancelled')),
+  -- Reversal (when an order is refunded)
+  reverses_earning_id   UUID        REFERENCES {{BUSINESS}}.commission_earned (earning_id) ON DELETE SET NULL,
+  -- Payroll linkage
+  payroll_run_id        UUID,                                    -- FK wired below
+  paid_at               TIMESTAMPTZ,
+  -- Audit
+  earned_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_commission_earned_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.commission_earned
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_commission_earned_user
+  ON {{BUSINESS}}.commission_earned (user_id, earned_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_commission_earned_status
+  ON {{BUSINESS}}.commission_earned (status, earned_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_commission_earned_channel
+  ON {{BUSINESS}}.commission_earned (sale_channel, earned_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_commission_earned_accrued
+  ON {{BUSINESS}}.commission_earned (user_id, earned_at)
+  WHERE status = 'accrued';
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PERFORMANCE APPRAISAL (V2.2 §6.11) — WEIGHTED KPIs                ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── performance_cycles ───────────────────────────────────
+-- An appraisal period (typically quarterly; configurable).
+CREATE TABLE {{BUSINESS}}.performance_cycles (
+  cycle_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  cycle_name            TEXT        NOT NULL,                  -- 'Q1 2026'
+  cycle_type            TEXT        NOT NULL DEFAULT 'quarterly'
+                        CHECK (cycle_type IN ('monthly','quarterly','semi_annual','annual','ad_hoc')),
+  starts_on             DATE        NOT NULL,
+  ends_on               DATE        NOT NULL,
+  status                TEXT        NOT NULL DEFAULT 'upcoming'
+                        CHECK (status IN ('upcoming','open','scoring','calibration','closed','archived')),
+  scoring_opens_at      DATE,
+  scoring_closes_at     DATE,
+  closed_at             TIMESTAMPTZ,
+  closed_by             UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Cycle-wide budget for cycle bonuses
+  bonus_pool_ngn        NUMERIC(14,2),
+  bonus_pool_distributed_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_performance_cycles_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.performance_cycles
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── performance_kpi_definitions ──────────────────────────
+-- THE V2.2 weighted KPIs. The defaults seeded for Faitlyn:
+--   Customer Feedback         40
+--   Sales Conversion          25
+--   Work Quality              20
+--   Cleanliness & Organisation 15
+-- Total weight should equal 100.
+-- Brands can edit / add via the admin UI.
+CREATE TABLE {{BUSINESS}}.performance_kpi_definitions (
+  kpi_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  kpi_key               TEXT        NOT NULL UNIQUE,            -- 'customer_feedback','sales_conversion','work_quality','cleanliness'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  weight_pct            NUMERIC(5,2) NOT NULL CHECK (weight_pct BETWEEN 0 AND 100),
+  -- Source: how the score is derived
+  score_source          TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (score_source IN ('manual','customer_ratings','sales_data','crm_data',
+                                                'service_job_ratings','clock_in_data','custom')),
+  -- For automatic scoring, the formula
+  auto_score_config     JSONB,
+  -- Scoring scale (typically 1-5)
+  min_score             NUMERIC(5,2) NOT NULL DEFAULT 1,
+  max_score             NUMERIC(5,2) NOT NULL DEFAULT 5,
+  -- Visibility (some KPIs may only apply to certain roles)
+  applies_to_role_ids   UUID[]      NOT NULL DEFAULT '{}',     -- empty = all roles
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_perf_kpi_defs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.performance_kpi_definitions
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── performance_scores ───────────────────────────────────
+-- One row per (staff, cycle, KPI). The weighted total is computed
+-- automatically: SUM(score * weight_pct / 100).
+CREATE TABLE {{BUSINESS}}.performance_scores (
+  score_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  cycle_id              UUID        NOT NULL REFERENCES {{BUSINESS}}.performance_cycles (cycle_id) ON DELETE CASCADE,
+  user_id               UUID        NOT NULL REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  kpi_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.performance_kpi_definitions (kpi_id) ON DELETE CASCADE,
+  -- Score (raw)
+  raw_score             NUMERIC(5,2) NOT NULL,
+  weight_pct_snapshot   NUMERIC(5,2) NOT NULL,                  -- captured at scoring time
+  weighted_score        NUMERIC(7,4) GENERATED ALWAYS AS (raw_score * weight_pct_snapshot / 100) STORED,
+  -- How
+  score_source          TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (score_source IN ('manual','customer_ratings','sales_data','crm_data',
+                                                'service_job_ratings','clock_in_data','custom')),
+  -- Auto-pulled evidence (for transparency)
+  evidence              JSONB,
+  -- Manual scoring
+  scored_by             UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  scored_at             TIMESTAMPTZ,
+  comments              TEXT,
+  -- Auto-score health tracking (Amendment Implicit-1).
+  -- When score_source != 'manual', these capture when the scheduled
+  -- job last successfully refreshed the score. Staleness alerts
+  -- compare last_auto_scored_at to the cycle window.
+  last_auto_scored_at   TIMESTAMPTZ,
+  last_auto_score_attempt_at TIMESTAMPTZ,
+  last_auto_score_status TEXT       CHECK (last_auto_score_status IN ('ok','no_data','error','skipped',NULL)),
+  last_auto_score_error TEXT,
+  -- Calibration (managers may adjust raw_score before close)
+  is_calibrated         BOOLEAN     NOT NULL DEFAULT false,
+  pre_calibration_score NUMERIC(5,2),
+  calibration_reason    TEXT,
+  UNIQUE (cycle_id, user_id, kpi_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_performance_scores_user_cycle
+  ON {{BUSINESS}}.performance_scores (user_id, cycle_id);
+CREATE INDEX idx_{{BUSINESS}}_performance_scores_cycle
+  ON {{BUSINESS}}.performance_scores (cycle_id);
+
+-- ── performance_reviews ──────────────────────────────────
+-- The written review accompanying the numeric scores.
+CREATE TABLE {{BUSINESS}}.performance_reviews (
+  review_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  cycle_id              UUID        NOT NULL REFERENCES {{BUSINESS}}.performance_cycles (cycle_id) ON DELETE CASCADE,
+  user_id               UUID        NOT NULL REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  -- Computed overall score
+  overall_weighted_score NUMERIC(7,4) NOT NULL,
+  overall_rating_band   TEXT        NOT NULL
+                        CHECK (overall_rating_band IN ('exceptional','exceeds','meets','needs_improvement','unsatisfactory')),
+  -- Written content
+  strengths             TEXT,
+  improvement_areas     TEXT,
+  development_goals     TEXT,
+  manager_comments      TEXT,
+  -- Two-sided: employee acknowledgement
+  employee_response     TEXT,
+  acknowledged_by_employee BOOLEAN  NOT NULL DEFAULT false,
+  acknowledged_at       TIMESTAMPTZ,
+  employee_disagreement TEXT,
+  -- Final state
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','submitted','reviewed','approved','finalised','disputed')),
+  reviewed_by_manager_id UUID       REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  reviewed_at           TIMESTAMPTZ,
+  approved_by_user_id   UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  -- Linked document (the PDF appraisal)
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (cycle_id, user_id)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_performance_reviews_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.performance_reviews
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_performance_reviews_user
+  ON {{BUSINESS}}.performance_reviews (user_id, created_at DESC);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ BONUSES                                                            ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── bonus_rules ──────────────────────────────────────────
+-- Bonus definitions. Includes V2.2 auto-trigger rules.
+CREATE TABLE {{BUSINESS}}.bonus_rules (
+  bonus_rule_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_name             TEXT        NOT NULL,
+  description           TEXT,
+  -- Bonus types
+  bonus_type            TEXT        NOT NULL
+                        CHECK (bonus_type IN (
+                          'customer_rating',     -- 4.8+ rating triggers
+                          'quarterly_performance', -- top performers in a cycle
+                          'recognition',         -- ad-hoc manager grant
+                          'milestone',           -- e.g. 5 years of service
+                          'referral_bonus',
+                          'sales_target',        -- hit revenue target
+                          'service_quality',     -- service_jobs avg rating
+                          'custom'
+                        )),
+  -- Amount
+  amount_type           TEXT        NOT NULL CHECK (amount_type IN ('fixed_ngn','pct_of_salary','from_pool','custom')),
+  amount_value          NUMERIC(14,2),
+  -- Eligibility
+  applies_to_role_ids   UUID[]      NOT NULL DEFAULT '{}',
+  -- Auto-trigger criteria (in JSONB)
+  -- Example for 4.8+ rating: {"avg_customer_rating": 4.8, "min_ratings": 5, "window_days": 90}
+  trigger_criteria      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  is_auto_triggered     BOOLEAN     NOT NULL DEFAULT false,
+  -- Frequency cap (e.g. only one customer_rating bonus per staff per quarter)
+  max_per_staff_per_year SMALLINT,
+  -- Lifecycle
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  valid_from            DATE        NOT NULL DEFAULT CURRENT_DATE,
+  valid_to              DATE,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_bonus_rules_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.bonus_rules
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── bonuses_awarded ──────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.bonuses_awarded (
+  bonus_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  bonus_number          TEXT        NOT NULL UNIQUE,            -- 'PXG-BON-0001'
+  user_id               UUID        NOT NULL REFERENCES shared.users (user_id),
+  bonus_rule_id         UUID        REFERENCES {{BUSINESS}}.bonus_rules (bonus_rule_id) ON DELETE SET NULL,
+  bonus_type            TEXT        NOT NULL,
+  -- Linked context
+  performance_cycle_id  UUID        REFERENCES {{BUSINESS}}.performance_cycles (cycle_id) ON DELETE SET NULL,
+  performance_review_id UUID        REFERENCES {{BUSINESS}}.performance_reviews (review_id) ON DELETE SET NULL,
+  -- Amount
+  amount_ngn            NUMERIC(14,2) NOT NULL CHECK (amount_ngn > 0),
+  reason                TEXT        NOT NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'pending_approval'
+                        CHECK (status IN ('pending_approval','approved','paid','rejected','reversed')),
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  -- Approval
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  rejected_at           TIMESTAMPTZ,
+  rejection_reason      TEXT,
+  -- Payroll linkage
+  payroll_run_id        UUID,                                    -- FK wired below
+  paid_at               TIMESTAMPTZ,
+  -- Audit
+  awarded_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  awarded_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_bonuses_awarded_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.bonuses_awarded
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_bonuses_awarded_user
+  ON {{BUSINESS}}.bonuses_awarded (user_id, awarded_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_bonuses_awarded_status
+  ON {{BUSINESS}}.bonuses_awarded (status, awarded_at DESC);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PAYROLL                                                            ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── payroll_runs ─────────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.payroll_runs (
+  run_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_number            TEXT        NOT NULL UNIQUE,            -- 'PXG-PAY-2026-05'
+  -- Period
+  fiscal_period_id      UUID        REFERENCES {{BUSINESS}}.fiscal_periods (period_id) ON DELETE SET NULL,
+  pay_month             SMALLINT    NOT NULL CHECK (pay_month BETWEEN 1 AND 12),
+  pay_year              SMALLINT    NOT NULL,
+  pay_date              DATE        NOT NULL,
+  period_start          DATE        NOT NULL,
+  period_end            DATE        NOT NULL,
+  -- Counts
+  total_staff           INTEGER     NOT NULL DEFAULT 0,
+  -- Totals (NGN)
+  total_gross_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_commission_ngn  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_bonus_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_paye_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_pension_employee_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_pension_employer_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_nhf_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_other_deductions_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_net_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','calculated','reviewed','approved','paid','reversed','disputed')),
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  calculated_at         TIMESTAMPTZ,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  paid_at               TIMESTAMPTZ,
+  -- Journal posting
+  journal_entry_id      UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  -- Documents
+  payroll_summary_doc_id UUID       REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  bank_schedule_doc_id  UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (pay_year, pay_month)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_payroll_runs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.payroll_runs
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_payroll_runs_period
+  ON {{BUSINESS}}.payroll_runs (pay_year, pay_month);
+CREATE INDEX idx_{{BUSINESS}}_payroll_runs_status
+  ON {{BUSINESS}}.payroll_runs (status, pay_date DESC);
+
+-- Wire deferred FKs
+ALTER TABLE {{BUSINESS}}.commission_earned
+  ADD CONSTRAINT fk_{{BUSINESS}}_commission_earned_payroll
+    FOREIGN KEY (payroll_run_id) REFERENCES {{BUSINESS}}.payroll_runs (run_id) ON DELETE SET NULL;
+ALTER TABLE {{BUSINESS}}.bonuses_awarded
+  ADD CONSTRAINT fk_{{BUSINESS}}_bonuses_awarded_payroll
+    FOREIGN KEY (payroll_run_id) REFERENCES {{BUSINESS}}.payroll_runs (run_id) ON DELETE SET NULL;
+
+-- ── payslips ─────────────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.payslips (
+  payslip_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  payslip_number        TEXT        NOT NULL UNIQUE,            -- 'PXG-SLP-0001'
+  payroll_run_id        UUID        NOT NULL REFERENCES {{BUSINESS}}.payroll_runs (run_id) ON DELETE CASCADE,
+  user_id               UUID        NOT NULL REFERENCES shared.users (user_id),
+  staff_profile_id      UUID        REFERENCES shared.staff_profiles (profile_id) ON DELETE SET NULL,
+  -- Snapshot of staff context at time of run
+  job_title_snapshot    TEXT,
+  department_snapshot   TEXT,
+  bank_account_snapshot TEXT,
+  -- Earnings (NGN)
+  base_salary_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  allowances_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  commission_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  bonus_ngn             NUMERIC(14,2) NOT NULL DEFAULT 0,
+  overtime_ngn          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  reimbursements_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  gross_pay_ngn         NUMERIC(14,2) NOT NULL,
+  -- Deductions
+  paye_ngn              NUMERIC(14,2) NOT NULL DEFAULT 0,
+  pension_employee_ngn  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  pension_employer_ngn  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  nhf_ngn               NUMERIC(14,2) NOT NULL DEFAULT 0,
+  loan_repayment_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  advance_recovery_ngn  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  other_deductions_ngn  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_deductions_ngn  NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Net
+  net_pay_ngn           NUMERIC(14,2) NOT NULL,
+  -- Payment execution
+  payment_status        TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (payment_status IN ('pending','queued','paid','failed','reversed')),
+  payment_method        TEXT,
+  payment_reference     TEXT,
+  paid_at               TIMESTAMPTZ,
+  failure_reason        TEXT,
+  -- Document
+  payslip_pdf_doc_id    UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  sent_at               TIMESTAMPTZ,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (payroll_run_id, user_id)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_payslips_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.payslips
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_payslips_run
+  ON {{BUSINESS}}.payslips (payroll_run_id);
+CREATE INDEX idx_{{BUSINESS}}_payslips_user
+  ON {{BUSINESS}}.payslips (user_id, created_at DESC);
+
+-- ── payslip_lines ────────────────────────────────────────
+-- Per-payslip line detail (each earning and deduction itemised).
+CREATE TABLE {{BUSINESS}}.payslip_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  payslip_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.payslips (payslip_id) ON DELETE CASCADE,
+  -- Type
+  line_type             TEXT        NOT NULL
+                        CHECK (line_type IN ('base_salary','housing_allowance','transport_allowance',
+                                             'commission','bonus','overtime','reimbursement','other_earning',
+                                             'paye','pension_employee','pension_employer','nhf','nsitf',
+                                             'loan_repayment','advance_recovery','other_deduction')),
+  description           TEXT        NOT NULL,
+  -- Amount (positive for earning, positive for deduction — the line_type drives sign)
+  amount_ngn            NUMERIC(14,2) NOT NULL CHECK (amount_ngn >= 0),
+  -- Linked source
+  source_type           TEXT,                                   -- 'commission_earned','bonuses_awarded','cash_advance', etc.
+  source_id             UUID,
+  -- GL hint
+  account_id            UUID        REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE SET NULL,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_payslip_lines_payslip
+  ON {{BUSINESS}}.payslip_lines (payslip_id);
+CREATE INDEX idx_{{BUSINESS}}_payslip_lines_source
+  ON {{BUSINESS}}.payslip_lines (source_type, source_id) WHERE source_id IS NOT NULL;
+
+-- ── payroll_deductions ───────────────────────────────────
+-- The configurable tax / pension / NHF tables used by the payroll
+-- engine. PAYE is progressive in Nigeria (consolidated relief
+-- allowance + tax bands).
+CREATE TABLE {{BUSINESS}}.payroll_deductions (
+  deduction_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  deduction_type        TEXT        NOT NULL
+                        CHECK (deduction_type IN ('paye','pension_employee','pension_employer','nhf','nsitf','other')),
+  -- Effective period
+  effective_from        DATE        NOT NULL,
+  effective_to          DATE,
+  -- Calculation config
+  rate_pct              NUMERIC(7,4),                            -- flat rate (pension, nhf)
+  -- Progressive bands (PAYE): [{lower:0, upper:300000, rate:0.07}, ...]
+  bands                 JSONB,
+  -- Consolidated relief allowance (NGN) for PAYE
+  consolidated_relief_ngn NUMERIC(14,2),
+  consolidated_relief_pct NUMERIC(7,4),
+  -- Caps
+  min_taxable_ngn       NUMERIC(14,2),
+  max_taxable_ngn       NUMERIC(14,2),
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_payroll_deductions_active
+  ON {{BUSINESS}}.payroll_deductions (deduction_type, effective_from DESC)
+  WHERE is_active = true;
+
+-- ============================================================
+-- After 000016..026+027: 114 + 13 = 127 tables
+-- ============================================================

@@ -1,0 +1,39 @@
+/**
+ * Canonical real-time room names.
+ *
+ * All Socket.io rooms used by the application MUST come from this file.
+ * The frontend has a mirror list — keep them in sync.
+ *
+ * Naming convention:
+ *   brand:<key>:<resource>[:<id>]   — per-brand resources
+ *   user:<uuid>:<channel>           — per-user push channels
+ *   system:<channel>                — global broadcasts (CEO-only by default)
+ */
+
+"use strict";
+
+const BRANDS = ["pixiegirl", "faitlynhair"];
+
+const ROOMS = {
+  // Brand-scoped resource streams
+  stock: (brand) => `brand:${brand}:stock`,
+  deliveries: (brand) => `brand:${brand}:deliveries`,
+  service_jobs: (brand) => `brand:${brand}:service_jobs`,
+  pos_session: (brand, sessionId) => `brand:${brand}:pos_session:${sessionId}`,
+  campaign_live: (brand, campaignId) => `brand:${brand}:campaign:${campaignId}`,
+  order_timeline_public: (brand, token) =>
+    `brand:${brand}:order_timeline:${token}`,
+  approvals: (brand) => `brand:${brand}:approvals`,
+
+  // User-scoped push channels
+  user_notifications: (userId) => `user:${userId}:notifications`,
+  user_ai_pending: (userId) => `user:${userId}:ai_pending`,
+  user_tasks: (userId) => `user:${userId}:tasks`,
+  user_messages: (userId) => `user:${userId}:messages`,
+
+  // System-wide (CEO/admin)
+  ai_usage_meter: "system:ai_usage_meter",
+  health: "system:health",
+};
+
+module.exports = { BRANDS, ROOMS };

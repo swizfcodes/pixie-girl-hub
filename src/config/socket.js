@@ -1,0 +1,68 @@
+/**
+ * Socket.io setup with Redis adapter for horizontal scaling.
+ *
+ * Rooms (per V2.2 spec real-time needs):
+ *   brand:{pixiegirl|faitlynhair}:stock
+ *   brand:{pixiegirl|faitlynhair}:deliveries
+ *   brand:{pixiegirl|faitlynhair}:service_jobs
+ *   brand:{pixiegirl|faitlynhair}:pos_session:{id}
+ *   brand:{pixiegirl|faitlynhair}:campaign:{id}
+ *   brand:{pixiegirl|faitlynhair}:order_timeline:{token}
+ *   user:{uuid}:notifications
+ *   user:{uuid}:ai_pending
+ *   system:ai_usage_meter
+ *
+ * See src/realtime/rooms.js for the canonical list.
+ */
+
+"use strict";
+
+const { Server } = require("socket.io");
+const { createAdapter } = require("@socket.io/redis-adapter");
+const { config } = require("./env");
+const { logger } = require("./logger");
+const { getPublisher, getSubscriber } = require("./redis");
+const { authenticateSocket } = require("../realtime/socket-auth");
+const { bindHandlers } = require("../realtime/handlers");
+
+let io = null;
+
+async function initSocketIo(httpServer) {
+  io = new Server(httpServer, {
+    cors: {
+      origin: config.CORS_ORIGINS.split(",").filter(Boolean),
+      credentials: true,
+    },
+    transports: ["websocket", "polling"],
+    pingInterval: 25_000,
+    pingTimeout: 60_000,
+  });
+
+  // Horizontal-scale adapter
+  const pub = getPublisher();
+  const sub = getSubscriber();
+  io.adapter(createAdapter(pub, sub));
+
+  // Auth middleware — verify JWT before allowing room joins
+  io.use(authenticateSocket);
+
+  // Bind handlers (room join/leave + module-specific event emitters)
+  bindHandlers(io);
+
+  logger.info("socket.io initialised with redis adapter");
+  return io;
+}
+
+function getIo() {
+  if (!io) throw new Error("socket.io not initialised");
+  return io;
+}
+
+async function closeSocketIo() {
+  if (io) {
+    await io.close();
+    io = null;
+  }
+}
+
+module.exports = { initSocketIo, getIo, closeSocketIo };

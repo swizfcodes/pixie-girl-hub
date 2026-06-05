@@ -1,0 +1,151 @@
+/**
+ * Top-level route mounting.
+ *
+ * URL convention:
+ *   /api/v1/<module>/...
+ *
+ * Brand context is resolved from the X-Brand-Context header (preferred)
+ * or path prefix. CEO-level cross-brand views live under /api/v1/group/*.
+ *
+ * Public/storefront endpoints (no auth) live under /api/public/*.
+ * Webhook receivers live under /api/webhooks/*.
+ */
+
+"use strict";
+
+const express = require("express");
+
+const { authMiddleware } = require("../middleware/auth");
+const { brandContextMiddleware } = require("../middleware/brand-context");
+
+// Auth & user-management
+const authRouter = require("../modules/hr_payroll/auth.routes");
+
+// Module routers — each exports an Express Router
+const crmRouter = require("../modules/crm/crm.routes");
+const salesRouter = require("../modules/sales/sales.routes");
+const posRouter = require("../modules/pos/pos.routes");
+const storefrontRouter = require("../modules/storefront/storefront.routes");
+const invoicingRouter = require("../modules/invoicing/invoicing.routes");
+const accountingRouter = require("../modules/accounting/accounting.routes");
+const expensesRouter = require("../modules/expenses/expenses.routes");
+const purchasingRouter = require("../modules/purchasing/purchasing.routes");
+const stockRouter = require("../modules/stock/stock.routes");
+const logisticsRouter = require("../modules/logistics/logistics.routes");
+const hrPayrollRouter = require("../modules/hr_payroll/hr.routes");
+const attendanceRouter = require("../modules/attendance/attendance.routes");
+const contactsRouter = require("../modules/contacts/contacts.routes");
+const documentsRouter = require("../modules/documents/documents.routes");
+const socialMediaRouter = require("../modules/social_media/social.routes");
+const marketingRouter = require("../modules/marketing/marketing.routes");
+const emailCampaignsRouter = require("../modules/email_campaigns/email-campaigns.routes");
+const smartcommRouter = require("../modules/smartcomm/smartcomm.routes");
+const calendarRouter = require("../modules/calendar/calendar.routes");
+const tasksRouter = require("../modules/tasks/tasks.routes");
+const dashboardsRouter = require("../modules/dashboards/dashboards.routes");
+const businessSetupRouter = require("../modules/business_setup/business-setup.routes");
+const salesCampaignsRouter = require("../modules/sales_campaigns/campaigns.routes");
+const retentionRouter = require("../modules/retention/retention.routes");
+const productionRouter = require("../modules/production/production.routes");
+const serviceJobsRouter = require("../modules/service_jobs/service-jobs.routes");
+const pricingRouter = require("../modules/pricing/pricing.routes");
+const stylistRouter = require("../modules/stylist_programme/stylist.routes");
+const orgWorkflowRouter = require("../modules/org_workflow/org.routes");
+const storefrontStudioRouter = require("../modules/storefront_studio/studio.routes");
+const intercompanyRouter = require("../modules/intercompany/intercompany.routes");
+const praxisRouter = require("../modules/praxis_ai/praxis.routes");
+const aiInsightsRouter = require("../modules/ai_insights/insights.routes");
+const aiGovernanceRouter = require("../modules/ai_governance/governance.routes");
+const retailPartnersRouter = require("../modules/retail_partners/partners.routes");
+const cashRequestRouter = require("../modules/cash_request/cash-request.routes");
+const auditRouter = require("../modules/audit/audit.routes");
+
+// Public (storefront-facing, no auth)
+const publicCatalogueRouter = require("../modules/storefront/public.routes");
+const publicTrackingRouter = require("../modules/logistics/tracking.routes");
+const publicOrderFormRouter = require("../modules/storefront/order-form.routes");
+const publicInstallHubRouter = require("../modules/storefront/install-hub.routes");
+const publicStylistVerifyRouter = require("../modules/stylist_programme/verify.routes");
+const publicReferralRouter = require("../modules/retention/referral.routes");
+const publicHairQuizRouter = require("../modules/retention/hair-quiz.routes");
+
+// Webhooks
+const webhooksRouter = require("../modules/business_setup/webhooks.routes");
+
+function mountRoutes(app) {
+  // ── Health & system ────────────────────────────────────
+  app.get("/health", (_req, res) =>
+    res.json({ ok: true, ts: new Date().toISOString() }),
+  );
+  app.get("/version", (_req, res) =>
+    res.json({
+      version: require("../../package.json").version,
+      node: process.version,
+    }),
+  );
+
+  // ── Public endpoints (no auth) ─────────────────────────
+  const publicRouter = express.Router();
+  publicRouter.use("/catalogue", publicCatalogueRouter);
+  publicRouter.use("/tracking", publicTrackingRouter);
+  publicRouter.use("/order-form", publicOrderFormRouter);
+  publicRouter.use("/install-hub", publicInstallHubRouter);
+  publicRouter.use("/stylist-verify", publicStylistVerifyRouter);
+  publicRouter.use("/referral", publicReferralRouter);
+  publicRouter.use("/hair-quiz", publicHairQuizRouter);
+  app.use("/api/public", publicRouter);
+
+  // ── Webhooks (signed payloads; auth via signature, not JWT) ──
+  app.use("/api/webhooks", webhooksRouter);
+
+  // ── Auth (issues JWTs; no auth required to call) ───────
+  app.use("/api/v1/auth", authRouter);
+
+  // ── Protected API surface ──────────────────────────────
+  // All routes below require an authenticated user and a brand context.
+  const api = express.Router();
+  api.use(authMiddleware);
+  api.use(brandContextMiddleware);
+
+  api.use("/crm", crmRouter);
+  api.use("/sales", salesRouter);
+  api.use("/pos", posRouter);
+  api.use("/storefront", storefrontRouter);
+  api.use("/invoicing", invoicingRouter);
+  api.use("/accounting", accountingRouter);
+  api.use("/expenses", expensesRouter);
+  api.use("/purchasing", purchasingRouter);
+  api.use("/stock", stockRouter);
+  api.use("/logistics", logisticsRouter);
+  api.use("/hr", hrPayrollRouter);
+  api.use("/attendance", attendanceRouter);
+  api.use("/contacts", contactsRouter);
+  api.use("/documents", documentsRouter);
+  api.use("/social", socialMediaRouter);
+  api.use("/marketing", marketingRouter);
+  api.use("/email-campaigns", emailCampaignsRouter);
+  api.use("/smartcomm", smartcommRouter);
+  api.use("/calendar", calendarRouter);
+  api.use("/tasks", tasksRouter);
+  api.use("/dashboards", dashboardsRouter);
+  api.use("/business-setup", businessSetupRouter);
+  api.use("/sales-campaigns", salesCampaignsRouter);
+  api.use("/retention", retentionRouter);
+  api.use("/production", productionRouter);
+  api.use("/service-jobs", serviceJobsRouter);
+  api.use("/pricing", pricingRouter);
+  api.use("/stylists", stylistRouter);
+  api.use("/org", orgWorkflowRouter);
+  api.use("/storefront-studio", storefrontStudioRouter);
+  api.use("/intercompany", intercompanyRouter);
+  api.use("/praxis", praxisRouter);
+  api.use("/insights", aiInsightsRouter);
+  api.use("/ai-governance", aiGovernanceRouter);
+  api.use("/retail-partners", retailPartnersRouter);
+  api.use("/cash-request", cashRequestRouter);
+  api.use("/audit", auditRouter);
+
+  app.use("/api/v1", api);
+}
+
+module.exports = { mountRoutes };

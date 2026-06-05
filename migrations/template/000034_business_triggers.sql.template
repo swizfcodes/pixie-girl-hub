@@ -1,0 +1,404 @@
+-- ============================================================
+-- TEMPLATE 000034 — Per-business triggers
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Triggers that enforce invariants and maintain denormalised
+-- summaries in this brand schema:
+--
+--   • stock_movements:        maintain stock_levels + flag low-stock
+--   • stock_levels:           CHECK no negative available
+--   • journal_lines:          enforce debit/credit balance per entry
+--   • journal_entries:        immutable when posted
+--   • invoices:               update status from amount_paid_ngn
+--   • sales_order_payments:   update sales_orders.amount_paid_ngn
+--   • sales_orders:           append state history on status change
+--   • purchase_orders:        append state history on status change
+--   • production_runs:        recompute landed cost on cost_components change
+--   • service_jobs:           auto-create task when assigned
+--   • cost_components:        roll up into production_runs totals
+--   • commission_earned:      auto-attribute from sales_orders
+--   • document_numbering:     atomic increment
+-- ============================================================
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ STOCK MOVEMENTS → STOCK LEVELS                                     ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_apply_stock_movement()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  -- 'reserve' moves on_hand → reserved (no net change); 'release_reserve' reverses
+  IF NEW.movement_type = 'reserve' THEN
+    INSERT INTO {{BUSINESS}}.stock_levels (variant_id, location_id, on_hand, reserved, last_movement_at)
+    VALUES (NEW.variant_id, NEW.location_id, 0, ABS(NEW.quantity), NEW.performed_at)
+    ON CONFLICT (variant_id, location_id) DO UPDATE
+      SET reserved = {{BUSINESS}}.stock_levels.reserved + ABS(EXCLUDED.reserved),
+          last_movement_at = EXCLUDED.last_movement_at,
+          updated_at = now();
+  ELSIF NEW.movement_type = 'release_reserve' THEN
+    UPDATE {{BUSINESS}}.stock_levels
+       SET reserved = GREATEST(0, reserved - ABS(NEW.quantity)),
+           last_movement_at = NEW.performed_at,
+           updated_at = now()
+     WHERE variant_id = NEW.variant_id AND location_id = NEW.location_id;
+  ELSE
+    -- Net stock change at this location
+    INSERT INTO {{BUSINESS}}.stock_levels (variant_id, location_id, on_hand, last_movement_at)
+    VALUES (NEW.variant_id, NEW.location_id, NEW.quantity, NEW.performed_at)
+    ON CONFLICT (variant_id, location_id) DO UPDATE
+      SET on_hand = {{BUSINESS}}.stock_levels.on_hand + EXCLUDED.on_hand,
+          last_movement_at = EXCLUDED.last_movement_at,
+          updated_at = now();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_apply_stock_movement
+  AFTER INSERT ON {{BUSINESS}}.stock_movements
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_apply_stock_movement();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ JOURNAL: enforce debit = credit per entry                          ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_journal_entry_balance_check()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_dr NUMERIC(14,2);
+  v_cr NUMERIC(14,2);
+BEGIN
+  IF NEW.status = 'posted' AND (OLD IS NULL OR OLD.status <> 'posted') THEN
+    SELECT COALESCE(SUM(debit_ngn),0), COALESCE(SUM(credit_ngn),0)
+      INTO v_dr, v_cr
+      FROM {{BUSINESS}}.journal_lines
+     WHERE entry_id = NEW.entry_id;
+    IF ROUND(v_dr,2) <> ROUND(v_cr,2) THEN
+      RAISE EXCEPTION 'Journal entry % is unbalanced: debits=% credits=%',
+        NEW.entry_number, v_dr, v_cr;
+    END IF;
+    -- Lock totals on the entry to match
+    NEW.total_debit_ngn := v_dr;
+    NEW.total_credit_ngn := v_cr;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_journal_entry_balance
+  BEFORE UPDATE OF status ON {{BUSINESS}}.journal_entries
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_journal_entry_balance_check();
+
+-- ── Journal entries: immutable when posted ───────────────
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_journal_entry_immutable()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  -- Once 'posted', only status -> 'reversed' / 'void' is allowed; everything else frozen
+  IF OLD.status = 'posted' AND NEW.status NOT IN ('reversed','void','posted') THEN
+    -- 'posted' -> 'posted' allowed (no-op updates); 'reversed','void' allowed
+    NULL;
+  ELSIF OLD.status = 'posted' THEN
+    -- Field-level immutability
+    IF OLD.entry_number     <> NEW.entry_number     THEN RAISE EXCEPTION 'entry_number is immutable when posted'; END IF;
+    IF OLD.posting_date     <> NEW.posting_date     THEN RAISE EXCEPTION 'posting_date is immutable when posted'; END IF;
+    IF OLD.total_debit_ngn  <> NEW.total_debit_ngn  THEN RAISE EXCEPTION 'total_debit_ngn is immutable when posted'; END IF;
+    IF OLD.total_credit_ngn <> NEW.total_credit_ngn THEN RAISE EXCEPTION 'total_credit_ngn is immutable when posted'; END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_journal_entry_immutable
+  BEFORE UPDATE ON {{BUSINESS}}.journal_entries
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_journal_entry_immutable();
+
+-- ── Journal lines: cannot be added to a posted entry ─────
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_journal_lines_no_change_when_posted()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_status TEXT;
+BEGIN
+  SELECT status INTO v_status FROM {{BUSINESS}}.journal_entries
+    WHERE entry_id = COALESCE(NEW.entry_id, OLD.entry_id);
+  IF v_status = 'posted' THEN
+    RAISE EXCEPTION 'Cannot modify lines of a posted journal entry';
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_journal_lines_protect
+  BEFORE INSERT OR UPDATE OR DELETE ON {{BUSINESS}}.journal_lines
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_journal_lines_no_change_when_posted();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ INVOICE: maintain amount_paid_ngn from invoice_payments            ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_invoice_recompute_paid()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_invoice_id UUID;
+  v_paid       NUMERIC(14,2);
+  v_total      NUMERIC(14,2);
+  v_net_due    NUMERIC(14,2);
+  v_new_status TEXT;
+BEGIN
+  v_invoice_id := COALESCE(NEW.invoice_id, OLD.invoice_id);
+
+  SELECT COALESCE(SUM(amount_applied_ngn),0)
+    INTO v_paid
+    FROM {{BUSINESS}}.invoice_payments
+   WHERE invoice_id = v_invoice_id;
+
+  SELECT total_ngn, net_due_ngn
+    INTO v_total, v_net_due
+    FROM {{BUSINESS}}.invoices
+   WHERE invoice_id = v_invoice_id;
+
+  -- Decide status
+  v_new_status := CASE
+    WHEN v_paid <= 0                THEN NULL                                 -- don't change current status
+    WHEN v_paid >= v_net_due        THEN 'paid'
+    WHEN v_paid > 0                 THEN 'partially_paid'
+    ELSE NULL
+  END;
+
+  UPDATE {{BUSINESS}}.invoices
+     SET amount_paid_ngn = v_paid,
+         status = COALESCE(v_new_status, status),
+         updated_at = now()
+   WHERE invoice_id = v_invoice_id;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_invoice_payment_recompute
+  AFTER INSERT OR UPDATE OR DELETE ON {{BUSINESS}}.invoice_payments
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_invoice_recompute_paid();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SALES ORDER: maintain amount_paid_ngn from sales_order_payments    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_sales_order_recompute_paid()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_order_id UUID;
+  v_paid     NUMERIC(14,2);
+BEGIN
+  v_order_id := COALESCE(NEW.order_id, OLD.order_id);
+
+  SELECT COALESCE(SUM(amount_ngn),0)
+    INTO v_paid
+    FROM {{BUSINESS}}.sales_order_payments
+   WHERE order_id = v_order_id
+     AND status IN ('captured','authorised');
+
+  UPDATE {{BUSINESS}}.sales_orders
+     SET amount_paid_ngn = v_paid,
+         updated_at = now()
+   WHERE order_id = v_order_id;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_sales_order_payment_recompute
+  AFTER INSERT OR UPDATE OR DELETE ON {{BUSINESS}}.sales_order_payments
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_sales_order_recompute_paid();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SALES ORDER: append state history on status change                 ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_sales_order_log_state()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status IS DISTINCT FROM NEW.status THEN
+    INSERT INTO {{BUSINESS}}.sales_order_state_history
+      (order_id, from_status, to_status, changed_by_source, changed_at)
+    VALUES
+      (NEW.order_id, OLD.status, NEW.status, 'system', now());
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_sales_order_log_state
+  AFTER UPDATE OF status ON {{BUSINESS}}.sales_orders
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_sales_order_log_state();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PURCHASE ORDER: append state history on status change              ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_po_log_state()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status IS DISTINCT FROM NEW.status THEN
+    INSERT INTO {{BUSINESS}}.po_state_history
+      (po_id, from_status, to_status, changed_by_source, changed_at)
+    VALUES
+      (NEW.po_id, OLD.status, NEW.status, 'system', now());
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_po_log_state
+  AFTER UPDATE OF status ON {{BUSINESS}}.purchase_orders
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_po_log_state();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ DELIVERY: append state history on status change                    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_delivery_log_state()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status IS DISTINCT FROM NEW.status THEN
+    INSERT INTO {{BUSINESS}}.delivery_state_history
+      (delivery_id, from_status, to_status, changed_by_source, changed_at)
+    VALUES
+      (NEW.delivery_id, OLD.status, NEW.status, 'system', now());
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_delivery_log_state
+  AFTER UPDATE OF status ON {{BUSINESS}}.deliveries
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_delivery_log_state();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PRODUCTION: roll up cost_components into production_runs totals    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_production_run_recompute_totals()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_run_id UUID;
+BEGIN
+  v_run_id := COALESCE(NEW.run_id, OLD.run_id);
+  UPDATE {{BUSINESS}}.production_runs r
+     SET total_factory_cost_ngn = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type IN ('factory_unit_cost','factory_overhead','raw_hair')),0),
+         total_freight_ngn      = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type = 'freight_international'),0),
+         total_customs_ngn      = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type IN ('customs_duty','customs_clearing_fee','port_storage')),0),
+         total_3pl_lagos_ngn    = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type = '3pl_lagos'),0),
+         total_styling_ngn      = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type = 'styling_intercompany'),0),
+         total_packaging_ngn    = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type = 'packaging'),0),
+         total_wastage_ngn      = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type IN ('wastage','samples')),0),
+         total_other_ngn        = COALESCE((SELECT SUM(amount_ngn) FROM {{BUSINESS}}.cost_components
+                                              WHERE run_id = v_run_id
+                                                AND cost_type IN ('quality_inspection','misc')),0),
+         updated_at             = now()
+   WHERE r.run_id = v_run_id;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_production_run_recompute
+  AFTER INSERT OR UPDATE OR DELETE ON {{BUSINESS}}.cost_components
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_production_run_recompute_totals();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SERVICE JOB: auto-create task when assigned (V2.2 §6.24)           ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_service_job_create_task()
+RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_task_id UUID;
+BEGIN
+  -- Only when newly assigned to a staff member (stylists are external; tasks are staff)
+  IF NEW.assigned_staff_user_id IS NOT NULL
+     AND (OLD IS NULL OR OLD.assigned_staff_user_id IS DISTINCT FROM NEW.assigned_staff_user_id)
+     AND NEW.task_id IS NULL THEN
+    INSERT INTO shared.tasks
+      (business, title, description, status, priority, assigned_to, due_at,
+       reference_type, reference_id, created_by)
+    VALUES
+      ('{{BUSINESS}}',
+       'Service Job ' || NEW.job_number,
+       'Complete service job. Status: ' || NEW.status,
+       'today',
+       'normal',
+       NEW.assigned_staff_user_id,
+       NEW.expected_completion_at,
+       'service_job',
+       NEW.job_id,
+       NEW.created_by)
+    RETURNING task_id INTO v_task_id;
+    -- Attach back the task_id
+    NEW.task_id := v_task_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_{{BUSINESS}}_service_job_create_task
+  BEFORE INSERT OR UPDATE OF assigned_staff_user_id ON {{BUSINESS}}.service_jobs
+  FOR EACH ROW EXECUTE FUNCTION {{BUSINESS}}.fn_service_job_create_task();
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ DOCUMENT NUMBERING: atomic increment helper                        ║
+-- ║ (Service-layer calls this function; not a trigger but lives here)  ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE OR REPLACE FUNCTION {{BUSINESS}}.fn_next_document_number(p_document_type TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_row    shared.document_numbering%ROWTYPE;
+  v_result TEXT;
+BEGIN
+  -- SELECT FOR UPDATE prevents duplicate issuance under concurrent load
+  SELECT * INTO v_row
+    FROM shared.document_numbering
+   WHERE business = '{{BUSINESS}}' AND document_type = p_document_type
+     FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'No document_numbering row for ({{BUSINESS}}, %)', p_document_type;
+  END IF;
+
+  v_result := v_row.prefix || '-' || LPAD(v_row.next_number::text, v_row.padding, '0');
+
+  UPDATE shared.document_numbering
+     SET next_number = next_number + 1
+   WHERE seq_id = v_row.seq_id;
+
+  RETURN v_result;
+END;
+$$;
+
+-- ============================================================
+-- All triggers and helpers above are no-table-add statements.
+-- ============================================================

@@ -1,0 +1,504 @@
+-- ============================================================
+-- TEMPLATE 000035 — Per-business seed data
+-- Pixie Girl Hub · JBS Praxis · V2.0  (V2.2: service types, perf KPIs)
+--
+-- Seeds the per-brand defaults so a freshly provisioned schema is
+-- immediately functional. Everything seeded here is EDITABLE via
+-- the admin UI — these are sensible starting points, not hardcoded
+-- constants.
+--
+-- Seeds:
+--   • document_numbering        — per-doc-type sequences (PXG-INV-0001, etc.)
+--   • account_groups            — 5 top-level groups
+--   • chart_of_accounts         — standard Nigerian retail COA
+--   • fiscal_periods            — 12 months for current year + period 13
+--   • crm_pipelines + stages    — default sales pipeline
+--   • service_types             — V2.2 five-item taxonomy (Faitlyn-relevant)
+--   • performance_kpi_definitions — V2.2 weighted KPIs (40/25/20/15)
+--   • payroll_deductions        — current Nigerian PAYE / Pension / NHF
+--   • stock_locations           — single default warehouse
+--   • expense_categories        — 12 starter categories
+--   • couriers                  — Chowdeck / GIGL / DHL / Manual starter
+--   • email_templates           — 5 starter templates
+--   • dashboard_widgets         — 8 starter KPI widgets
+--   • report_templates          — V2.2 weekly Sales + Customer reports
+--   • Shared tables: also seeds shared.loyalty_tiers for this brand,
+--     shared.document_numbering (the sequences live in shared)
+-- ============================================================
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SHARED.DOCUMENT_NUMBERING — per-brand sequences                    ║
+-- ║ Prefix is the business's 3-char document_prefix (e.g. 'PXG','FLH') ║
+-- ║ The actual prefix is read at insert time via business_config join. ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+DO $$
+DECLARE
+  v_prefix TEXT;
+BEGIN
+  SELECT document_prefix INTO v_prefix
+    FROM shared.business_config
+   WHERE business_key = '{{BUSINESS}}';
+
+  IF v_prefix IS NULL THEN
+    RAISE EXCEPTION 'business_config row for {{BUSINESS}} not found — bootstrap must insert it before seeding';
+  END IF;
+
+  INSERT INTO shared.document_numbering (business, document_type, prefix, padding, next_number) VALUES
+    ('{{BUSINESS}}', 'invoice',                       v_prefix || '-INV',  4, 1),
+    ('{{BUSINESS}}', 'sales_order',                   v_prefix || '-SO',   4, 1),
+    ('{{BUSINESS}}', 'quotation',                     v_prefix || '-QUO',  4, 1),
+    ('{{BUSINESS}}', 'credit_note',                   v_prefix || '-CN',   4, 1),
+    ('{{BUSINESS}}', 'receipt',                       v_prefix || '-RCT',  4, 1),
+    ('{{BUSINESS}}', 'sales_order_payment',           v_prefix || '-PAY',  4, 1),
+    ('{{BUSINESS}}', 'pos_transaction',               v_prefix || '-POS',  4, 1),
+    ('{{BUSINESS}}', 'pos_session',                   v_prefix || '-SESS', 4, 1),
+    ('{{BUSINESS}}', 'pos_cash_drop',                 v_prefix || '-DROP', 4, 1),
+    ('{{BUSINESS}}', 'purchase_order',                v_prefix || '-PO',   4, 1),
+    ('{{BUSINESS}}', 'rfq',                           v_prefix || '-RFQ',  4, 1),
+    ('{{BUSINESS}}', 'goods_received_note',           v_prefix || '-GRN',  4, 1),
+    ('{{BUSINESS}}', 'supplier_invoice',              v_prefix || '-SI',   4, 1),
+    ('{{BUSINESS}}', 'stock_movement',                v_prefix || '-MOV',  4, 1),
+    ('{{BUSINESS}}', 'stock_transfer',                v_prefix || '-TRF',  4, 1),
+    ('{{BUSINESS}}', 'stock_adjustment',              v_prefix || '-ADJ',  4, 1),
+    ('{{BUSINESS}}', 'inbound_shipment',              v_prefix || '-SHP',  4, 1),
+    ('{{BUSINESS}}', 'delivery',                      v_prefix || '-DEL',  4, 1),
+    ('{{BUSINESS}}', 'pay_on_delivery_collection',    v_prefix || '-POD',  4, 1),
+    ('{{BUSINESS}}', 'journal_entry',                 v_prefix || '-JE',   4, 1),
+    ('{{BUSINESS}}', 'bank_reconciliation',           v_prefix || '-REC',  4, 1),
+    ('{{BUSINESS}}', 'expense',                       v_prefix || '-EXP',  4, 1),
+    ('{{BUSINESS}}', 'cash_advance',                  v_prefix || '-ADV',  4, 1),
+    ('{{BUSINESS}}', 'crm_deal',                      v_prefix || '-DEAL', 4, 1),
+    ('{{BUSINESS}}', 'production_run',                v_prefix || '-RUN',  4, 1),
+    ('{{BUSINESS}}', 'funding_source',                v_prefix || '-FND',  4, 1),
+    ('{{BUSINESS}}', 'service_job',                   v_prefix || '-JOB',  4, 1),
+    ('{{BUSINESS}}', 'payroll_run',                   v_prefix || '-PAY',  4, 1),
+    ('{{BUSINESS}}', 'payslip',                       v_prefix || '-SLP',  4, 1),
+    ('{{BUSINESS}}', 'commission_earned',             v_prefix || '-COM',  4, 1),
+    ('{{BUSINESS}}', 'bonus',                         v_prefix || '-BON',  4, 1),
+    ('{{BUSINESS}}', 'price_proposal',                v_prefix || '-PRP',  4, 1),
+    ('{{BUSINESS}}', 'partner_settlement',            v_prefix || '-SET',  4, 1),
+    ('{{BUSINESS}}', 'consignment_movement',          v_prefix || '-CON',  4, 1),
+    ('{{BUSINESS}}', 'email_campaign',                v_prefix || '-EML',  4, 1),
+    ('{{BUSINESS}}', 'report_run',                    v_prefix || '-RPT',  4, 1),
+    ('{{BUSINESS}}', 'cancellation_request',          v_prefix || '-CAN',  4, 1)
+  ON CONFLICT (business, document_type) DO NOTHING;
+END;
+$$;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SHARED.LOYALTY_TIERS — Bronze / Silver / Gold / Platinum           ║
+-- ║ Editable via admin (Tier-2 in the CRUD inventory).                 ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO shared.loyalty_tiers
+  (business, tier_key, tier_name, display_order, min_lifetime_points, earning_multiplier, benefits) VALUES
+  ('{{BUSINESS}}', 'bronze',   'Bronze',   1, 0,       1.0, '{"description":"Welcome tier — earn points on every purchase"}'::jsonb),
+  ('{{BUSINESS}}', 'silver',   'Silver',   2, 5000,    1.5, '{"description":"5,000+ lifetime points · early access to launches"}'::jsonb),
+  ('{{BUSINESS}}', 'gold',     'Gold',     3, 25000,   2.0, '{"description":"25,000+ lifetime points · free standard shipping · birthday bonus"}'::jsonb),
+  ('{{BUSINESS}}', 'platinum', 'Platinum', 4, 100000,  3.0, '{"description":"100,000+ lifetime points · priority styling · annual VIP gift"}'::jsonb)
+ON CONFLICT DO NOTHING;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ ACCOUNT GROUPS                                                     ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.account_groups (group_code, group_name, group_type, normal_balance, statement, display_order) VALUES
+  ('1', 'Assets',      'asset',     'debit',  'balance_sheet',    1),
+  ('2', 'Liabilities', 'liability', 'credit', 'balance_sheet',    2),
+  ('3', 'Equity',      'equity',    'credit', 'balance_sheet',    3),
+  ('4', 'Revenue',     'revenue',   'credit', 'income_statement', 4),
+  ('5', 'Expenses',    'expense',   'debit',  'income_statement', 5);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ CHART OF ACCOUNTS — Standard Nigerian retail COA                   ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+DO $$
+DECLARE
+  g_assets UUID;       g_liabilities UUID;   g_equity UUID;
+  g_revenue UUID;      g_expenses UUID;
+BEGIN
+  SELECT group_id INTO g_assets      FROM {{BUSINESS}}.account_groups WHERE group_code = '1';
+  SELECT group_id INTO g_liabilities FROM {{BUSINESS}}.account_groups WHERE group_code = '2';
+  SELECT group_id INTO g_equity      FROM {{BUSINESS}}.account_groups WHERE group_code = '3';
+  SELECT group_id INTO g_revenue     FROM {{BUSINESS}}.account_groups WHERE group_code = '4';
+  SELECT group_id INTO g_expenses    FROM {{BUSINESS}}.account_groups WHERE group_code = '5';
+
+  -- ASSETS (1xxx)
+  INSERT INTO {{BUSINESS}}.chart_of_accounts (account_code, account_name, group_id, is_control_account, control_subledger) VALUES
+    ('1000', 'Cash on Hand',                          g_assets, false, NULL),
+    ('1010', 'Petty Cash',                            g_assets, false, NULL),
+    ('1100', 'Bank — Operating Account (NGN)',        g_assets, false, NULL),
+    ('1110', 'Bank — USD Account',                    g_assets, false, NULL),
+    ('1120', 'Paystack Settlement Account',           g_assets, false, NULL),
+    ('1130', 'Strive Connect Settlement',             g_assets, false, NULL),
+    ('1140', 'Nomba Settlement',                      g_assets, false, NULL),
+    ('1200', 'Accounts Receivable — Customers',       g_assets, true,  'AR'),
+    ('1210', 'Inter-Company Receivable',              g_assets, false, NULL),
+    ('1300', 'Inventory — Finished Goods',            g_assets, true,  'inventory'),
+    ('1310', 'Inventory — In Production',             g_assets, true,  'inventory'),
+    ('1320', 'Inventory — In Transit',                g_assets, true,  'inventory'),
+    ('1400', 'Prepaid Expenses',                      g_assets, false, NULL),
+    ('1410', 'Cash Advances Issued',                  g_assets, false, NULL),
+    ('1500', 'Fixed Assets — Equipment',              g_assets, false, NULL),
+    ('1510', 'Accumulated Depreciation — Equipment',  g_assets, false, NULL),
+    ('1600', 'Funding in Transit',                    g_assets, false, NULL);
+
+  -- LIABILITIES (2xxx)
+  INSERT INTO {{BUSINESS}}.chart_of_accounts (account_code, account_name, group_id, is_control_account, control_subledger) VALUES
+    ('2000', 'Accounts Payable — Suppliers',          g_liabilities, true,  'AP'),
+    ('2010', 'Inter-Company Payable',                 g_liabilities, false, NULL),
+    ('2100', 'VAT Output (sales)',                    g_liabilities, false, NULL),
+    ('2110', 'VAT Input (purchases)',                 g_liabilities, false, NULL),
+    ('2200', 'PAYE Payable',                          g_liabilities, false, NULL),
+    ('2210', 'Pension Payable — Employee',            g_liabilities, false, NULL),
+    ('2220', 'Pension Payable — Employer',            g_liabilities, false, NULL),
+    ('2230', 'NHF Payable',                           g_liabilities, false, NULL),
+    ('2240', 'WHT Payable',                           g_liabilities, false, NULL),
+    ('2250', 'CIT Payable',                           g_liabilities, false, NULL),
+    ('2300', 'Accrued Salaries',                      g_liabilities, false, NULL),
+    ('2310', 'Accrued Expenses',                      g_liabilities, false, NULL),
+    ('2400', 'Customer Deposits',                     g_liabilities, false, NULL),
+    ('2410', 'Gift Card / Voucher Liability',         g_liabilities, false, NULL),
+    ('2420', 'Loyalty Points Liability',              g_liabilities, false, NULL),
+    ('2500', 'Loans Payable',                         g_liabilities, false, NULL);
+
+  -- EQUITY (3xxx)
+  INSERT INTO {{BUSINESS}}.chart_of_accounts (account_code, account_name, group_id) VALUES
+    ('3000', 'Share Capital',                         g_equity),
+    ('3100', 'Retained Earnings',                     g_equity),
+    ('3200', 'Current Year Earnings',                 g_equity),
+    ('3300', 'Owner Drawings',                        g_equity);
+
+  -- REVENUE (4xxx)
+  INSERT INTO {{BUSINESS}}.chart_of_accounts (account_code, account_name, group_id) VALUES
+    ('4000', 'Sales — Storefront',                    g_revenue),
+    ('4010', 'Sales — POS / Walk-in',                 g_revenue),
+    ('4020', 'Sales — Instagram',                     g_revenue),
+    ('4030', 'Sales — WhatsApp',                      g_revenue),
+    ('4040', 'Sales — Wholesale',                     g_revenue),
+    ('4050', 'Sales — Inter-Company',                 g_revenue),
+    ('4060', 'Sales — Subscription',                  g_revenue),
+    ('4100', 'Service Revenue — Installation',        g_revenue),
+    ('4110', 'Service Revenue — Revamping',           g_revenue),
+    ('4120', 'Service Revenue — Colour Creation',     g_revenue),
+    ('4130', 'Service Revenue — Customization',       g_revenue),
+    ('4140', 'Service Revenue — Packing',             g_revenue),
+    ('4200', 'Shipping Revenue',                      g_revenue),
+    ('4900', 'Other Income',                          g_revenue),
+    ('4910', 'FX Gain — Realised',                    g_revenue),
+    ('4920', 'FX Gain — Unrealised',                  g_revenue);
+
+  -- EXPENSES (5xxx)
+  INSERT INTO {{BUSINESS}}.chart_of_accounts (account_code, account_name, group_id) VALUES
+    ('5000', 'Cost of Goods Sold',                    g_expenses),
+    ('5010', 'COGS — Factory Cost',                   g_expenses),
+    ('5020', 'COGS — Freight International',          g_expenses),
+    ('5030', 'COGS — Customs Duty',                   g_expenses),
+    ('5040', 'COGS — Customs Clearing',               g_expenses),
+    ('5050', 'COGS — 3PL Lagos',                      g_expenses),
+    ('5060', 'COGS — Styling Inter-Company',          g_expenses),
+    ('5070', 'COGS — Packaging',                      g_expenses),
+    ('5080', 'COGS — Wastage / Damages',              g_expenses),
+    ('5100', 'Salaries & Wages',                      g_expenses),
+    ('5110', 'Commission Expense',                    g_expenses),
+    ('5120', 'Bonus Expense',                         g_expenses),
+    ('5130', 'Pension — Employer Contribution',       g_expenses),
+    ('5140', 'NHF — Employer Contribution',           g_expenses),
+    ('5150', 'Staff Welfare',                         g_expenses),
+    ('5200', 'Rent',                                  g_expenses),
+    ('5210', 'Utilities',                             g_expenses),
+    ('5220', 'Internet & Telecoms',                   g_expenses),
+    ('5300', 'Marketing — Ad Spend',                  g_expenses),
+    ('5310', 'Marketing — Influencer / Stylist',      g_expenses),
+    ('5320', 'Marketing — Content / Photography',     g_expenses),
+    ('5400', 'Logistics — Courier Local',             g_expenses),
+    ('5410', 'Logistics — Courier International',     g_expenses),
+    ('5500', 'Bank Charges',                          g_expenses),
+    ('5510', 'Payment Processor Fees',                g_expenses),
+    ('5600', 'Professional Services',                 g_expenses),
+    ('5610', 'Software Subscriptions',                g_expenses),
+    ('5620', 'AI / Cloud Services',                   g_expenses),
+    ('5700', 'Travel & Subsistence',                  g_expenses),
+    ('5710', 'Office Supplies',                       g_expenses),
+    ('5800', 'Depreciation',                          g_expenses),
+    ('5900', 'Other Operating Expenses',              g_expenses),
+    ('5910', 'FX Loss — Realised',                    g_expenses),
+    ('5920', 'FX Loss — Unrealised',                  g_expenses);
+END;
+$$;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ FISCAL PERIODS — current year                                      ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+DO $$
+DECLARE
+  v_year SMALLINT := EXTRACT(YEAR FROM CURRENT_DATE)::SMALLINT;
+  v_month SMALLINT;
+  v_start DATE;
+  v_end   DATE;
+BEGIN
+  FOR v_month IN 1..12 LOOP
+    v_start := make_date(v_year, v_month, 1);
+    v_end   := (v_start + INTERVAL '1 month - 1 day')::date;
+    INSERT INTO {{BUSINESS}}.fiscal_periods
+      (fiscal_year, period_number, period_name, starts_on, ends_on, status)
+    VALUES
+      (v_year, v_month,
+       to_char(v_start, 'Mon YYYY'),
+       v_start, v_end,
+       CASE
+         WHEN v_end < CURRENT_DATE - INTERVAL '60 days' THEN 'closed'
+         WHEN v_end < CURRENT_DATE THEN 'open'
+         WHEN v_start <= CURRENT_DATE AND v_end >= CURRENT_DATE THEN 'open'
+         ELSE 'future'
+       END)
+    ON CONFLICT (fiscal_year, period_number) DO NOTHING;
+  END LOOP;
+  -- Period 13 (year-end adjustments)
+  INSERT INTO {{BUSINESS}}.fiscal_periods
+    (fiscal_year, period_number, period_name, starts_on, ends_on, status, is_year_end)
+  VALUES
+    (v_year, 13, 'Year-End Adjustments ' || v_year,
+     make_date(v_year, 12, 31), make_date(v_year, 12, 31), 'future', true)
+  ON CONFLICT (fiscal_year, period_number) DO NOTHING;
+END;
+$$;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ DEFAULT CRM PIPELINE                                               ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+DO $$
+DECLARE
+  v_pipeline_id UUID;
+BEGIN
+  INSERT INTO {{BUSINESS}}.crm_pipelines
+    (pipeline_key, display_name, description, is_default, applies_to)
+  VALUES
+    ('sales', 'Standard Sales', 'Default pipeline for all sales opportunities', true, 'all')
+  RETURNING pipeline_id INTO v_pipeline_id;
+
+  INSERT INTO {{BUSINESS}}.crm_pipeline_stages
+    (pipeline_id, stage_key, display_name, display_order, win_probability_pct, sla_days, is_terminal, is_won, is_lost) VALUES
+    (v_pipeline_id, 'new_lead',        'New Lead',         10, 10, 2,    false, false, false),
+    (v_pipeline_id, 'contacted',       'Contacted',        20, 25, 3,    false, false, false),
+    (v_pipeline_id, 'consultation',    'Consultation',     30, 40, 7,    false, false, false),
+    (v_pipeline_id, 'quote_sent',      'Quote Sent',       40, 60, 5,    false, false, false),
+    (v_pipeline_id, 'payment_pending', 'Payment Pending',  50, 80, 3,    false, false, false),
+    (v_pipeline_id, 'paid',            'Paid (Won)',       60, 100, NULL, true,  true,  false),
+    (v_pipeline_id, 'lost',            'Lost',             90, 0, NULL,   true,  false, true);
+END;
+$$;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ SERVICE TYPES (V2.2 §6.24 — five-item taxonomy)                   ║
+-- ║ Both brands get the same 5 service types. PXG won't use them.      ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.service_types
+  (service_key, display_name, description, standard_cost_ngn, standard_turnaround_days, display_order) VALUES
+  ('installation',     'Installation',     'Salon installation of wig on customer head',                  35000.00, 1, 1),
+  ('revamping',        'Revamping',        'Refresh of existing wig (washing, conditioning, restyling)',  25000.00, 2, 2),
+  ('colour_creation',  'Colour Creation',  'Bespoke colour mixing and application',                       60000.00, 3, 3),
+  ('customization',    'Customization',    'Cap modification, plucking, bleaching knots, custom styling', 50000.00, 3, 4),
+  ('packing',          'Packing',          'Professional packing for retail / dispatch',                  5000.00,  1, 5);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PERFORMANCE KPI DEFINITIONS — V2.2 weighted KPIs (40/25/20/15)    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.performance_kpi_definitions
+  (kpi_key, display_name, description, weight_pct, score_source, display_order) VALUES
+  ('customer_feedback',  'Customer Feedback',          'Average customer rating across all service jobs and sales',                 40.00, 'service_job_ratings', 1),
+  ('sales_conversion',   'Sales Conversion',           'Conversion rate from leads contacted to deals won',                         25.00, 'crm_data',            2),
+  ('work_quality',       'Work Quality',               'Manager-assessed quality of work (audits + spot checks)',                   20.00, 'manual',              3),
+  ('cleanliness',        'Cleanliness & Organisation', 'Manager-assessed cleanliness and tidiness of workstation/area',             15.00, 'manual',              4);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PAYROLL DEDUCTIONS — Nigerian PAYE / Pension / NHF (current)      ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- PAYE progressive bands (per Nigerian Finance Act). Consolidated
+-- Relief Allowance = ₦200,000 OR 1% of gross, whichever is higher,
+-- PLUS 20% of gross income.
+INSERT INTO {{BUSINESS}}.payroll_deductions
+  (deduction_type, effective_from, bands, consolidated_relief_ngn, consolidated_relief_pct, notes) VALUES
+  ('paye', '2026-01-01',
+   '[{"lower":0,"upper":300000,"rate":0.07},
+     {"lower":300000,"upper":600000,"rate":0.11},
+     {"lower":600000,"upper":1100000,"rate":0.15},
+     {"lower":1100000,"upper":1600000,"rate":0.19},
+     {"lower":1600000,"upper":3200000,"rate":0.21},
+     {"lower":3200000,"upper":null,"rate":0.24}]'::jsonb,
+   200000.00, 0.20,
+   'Nigerian PAYE per Finance Act. CRA = max(200k, 1% gross) + 20% gross.');
+
+-- Pension: Employee 8%, Employer 10% (Pension Reform Act)
+INSERT INTO {{BUSINESS}}.payroll_deductions (deduction_type, effective_from, rate_pct, notes) VALUES
+  ('pension_employee', '2026-01-01', 0.0800, 'Employee contribution 8% of basic + transport + housing'),
+  ('pension_employer', '2026-01-01', 0.1000, 'Employer contribution 10% of basic + transport + housing'),
+  ('nhf',              '2026-01-01', 0.0250, 'NHF 2.5% of basic salary'),
+  ('nsitf',            '2026-01-01', 0.0100, 'NSITF 1% of total payroll (employer obligation, NSITF Act 2010) — Amendment Implicit-3');
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ DEFAULT STOCK LOCATION                                             ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.stock_locations
+  (location_code, display_name, location_type, city, country, is_default, available_for_storefront, available_for_pos) VALUES
+  ('HQ-LAG', 'Lagos HQ Warehouse', 'warehouse', 'Lagos', 'Nigeria', true, true, true);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ STARTER EXPENSE CATEGORIES                                         ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+DO $$
+DECLARE
+  acc_office UUID;     acc_travel UUID;     acc_marketing UUID;
+  acc_logistics UUID;  acc_utilities UUID;  acc_bank UUID;
+  acc_software UUID;   acc_welfare UUID;    acc_misc UUID;
+BEGIN
+  SELECT account_id INTO acc_office    FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5710';
+  SELECT account_id INTO acc_travel    FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5700';
+  SELECT account_id INTO acc_marketing FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5300';
+  SELECT account_id INTO acc_logistics FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5400';
+  SELECT account_id INTO acc_utilities FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5210';
+  SELECT account_id INTO acc_bank      FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5500';
+  SELECT account_id INTO acc_software  FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5610';
+  SELECT account_id INTO acc_welfare   FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5150';
+  SELECT account_id INTO acc_misc      FROM {{BUSINESS}}.chart_of_accounts WHERE account_code = '5900';
+
+  INSERT INTO {{BUSINESS}}.expense_categories
+    (category_key, display_name, default_account_id, default_vat_rate, display_order) VALUES
+    ('office_supplies',  'Office Supplies',           acc_office,     0.075, 10),
+    ('travel_local',     'Travel — Local',            acc_travel,     0.000, 20),
+    ('travel_international', 'Travel — International', acc_travel,    0.000, 30),
+    ('marketing_ads',    'Marketing — Ads',           acc_marketing,  0.075, 40),
+    ('marketing_influencer', 'Marketing — Influencer', acc_marketing, 0.000, 50),
+    ('logistics_local',  'Logistics — Courier Local', acc_logistics,  0.075, 60),
+    ('utilities',        'Utilities (Power, Water)',  acc_utilities,  0.075, 70),
+    ('internet',         'Internet & Telecoms',       acc_utilities,  0.075, 80),
+    ('bank_charges',     'Bank Charges',              acc_bank,       0.000, 90),
+    ('software',         'Software Subscriptions',    acc_software,   0.075, 100),
+    ('staff_welfare',    'Staff Welfare / Refreshments', acc_welfare, 0.075, 110),
+    ('miscellaneous',    'Miscellaneous',             acc_misc,       0.000, 200);
+END;
+$$;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ STARTER COURIERS                                                   ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.couriers
+  (courier_key, display_name, integration_type, serves_local, serves_nationwide, serves_international, supports_pod, rate_card, display_order) VALUES
+  ('manual',     'Manual / Walk-in',  'manual',       true,  false, false, false, '{}'::jsonb,                                                  10),
+  ('chowdeck',   'Chowdeck',          'api',          true,  false, false, true,  '{"flat":1500,"per_km":150}'::jsonb,                          20),
+  ('gigl',       'GIG Logistics',     'api',          true,  true,  false, true,  '{"local":1500,"interstate":3000,"per_kg":500}'::jsonb,       30),
+  ('dhl_express','DHL Express',       'api',          false, false, true,  false, '{"intl_per_kg":15000,"min_fee":50000}'::jsonb,               40);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ STARTER EMAIL TEMPLATES                                            ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.email_templates
+  (template_key, display_name, subject_line, html_body, plain_text_body, available_variables, category, status, is_system_template) VALUES
+  ('welcome',              'Welcome Email',
+   'Welcome to {{BUSINESS}}, {{customer_name}}!',
+   '<h1>Welcome!</h1><p>Hi {{customer_name}}, thank you for joining us.</p>',
+   'Hi {{customer_name}}, thank you for joining us.',
+   ARRAY['customer_name'], 'onboarding', 'approved', true),
+  ('order_confirmation',   'Order Confirmation',
+   'Your order {{order_number}} is confirmed',
+   '<h1>Order Confirmed</h1><p>Hi {{customer_name}}, your order {{order_number}} has been received.</p>',
+   'Hi {{customer_name}}, your order {{order_number}} has been received.',
+   ARRAY['customer_name','order_number','order_total','tracking_url'], 'transactional', 'approved', true),
+  ('shipped',              'Order Shipped',
+   'Your order {{order_number}} is on its way',
+   '<h1>Shipped!</h1><p>Hi {{customer_name}}, track your order: {{tracking_url}}</p>',
+   'Hi {{customer_name}}, track your order: {{tracking_url}}',
+   ARRAY['customer_name','order_number','tracking_url','courier_name'], 'transactional', 'approved', true),
+  ('birthday',             'Birthday Email',
+   'Happy birthday, {{customer_name}} — a gift from us',
+   '<h1>Happy Birthday!</h1><p>Use code {{coupon_code}} for {{discount}}% off.</p>',
+   'Happy Birthday! Use code {{coupon_code}} for {{discount}}% off.',
+   ARRAY['customer_name','coupon_code','discount'], 'retention', 'approved', true),
+  ('abandoned_cart',       'Abandoned Cart Recovery',
+   'Did you forget something, {{customer_name}}?',
+   '<h1>Your cart is waiting</h1><p>Complete your purchase: {{cart_url}}</p>',
+   'Complete your purchase: {{cart_url}}',
+   ARRAY['customer_name','cart_url','items_count'], 'retention', 'approved', true);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ STARTER DASHBOARD WIDGETS                                          ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.dashboard_widgets
+  (widget_key, display_name, widget_type, query_type, module_key, is_system_widget) VALUES
+  ('sales_today',          'Sales Today',                 'kpi_number',     'module_built_in', 'sales.today',          true),
+  ('sales_this_month',     'Sales This Month',            'kpi_with_delta', 'module_built_in', 'sales.month',          true),
+  ('open_orders',          'Open Orders',                 'kpi_number',     'module_built_in', 'sales.open_orders',    true),
+  ('low_stock_count',      'Low Stock Items',             'kpi_number',     'module_built_in', 'stock.low_count',      true),
+  ('open_invoices_total',  'Outstanding Invoices (₦)',    'kpi_number',     'module_built_in', 'invoicing.open_total', true),
+  ('cash_position',        'Cash Position',               'kpi_number',     'module_built_in', 'accounting.cash',      true),
+  ('recent_activity',      'Recent Activity',             'feed',           'module_built_in', 'activity.recent',      true),
+  ('sales_by_channel',     'Sales by Channel',            'pie_chart',      'module_built_in', 'sales.by_channel',     true);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ REPORT TEMPLATES — V2.2 weekly Sales + Customer reports           ║
+-- ║ Replaces the Saturday 8 PM Zoho/Sheet ritual.                      ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+INSERT INTO {{BUSINESS}}.report_templates
+  (template_key, display_name, description, cadence,
+   scheduled_day_of_week, scheduled_hour, sections,
+   requires_staff_confirmation, output_formats,
+   is_system_template) VALUES
+  ('weekly_sales_report', 'Weekly Sales Report',
+   'Auto-generated weekly Sales Report (replaces manual Saturday 8 PM Sales report). Covers leads, quotes, orders confirmed and fulfilled, deals lost with reasons, and outstanding follow-ups.',
+   'weekly', 6, 20,
+   '[
+     {"key":"new_leads_by_channel","title":"New Leads by Channel"},
+     {"key":"quotes_sent","title":"Quotes Sent"},
+     {"key":"orders_confirmed","title":"Orders Confirmed"},
+     {"key":"orders_fulfilled","title":"Orders Fulfilled"},
+     {"key":"deals_lost_with_reasons","title":"Deals Lost (with reasons)"},
+     {"key":"outstanding_follow_ups","title":"Outstanding Follow-ups"}
+   ]'::jsonb,
+   true,
+   ARRAY['pdf','html'],
+   true),
+  ('weekly_customer_report', 'Weekly Customer Report',
+   'Auto-generated weekly Customer Report (replaces manual Saturday Customer report). Covers complaints + resolutions, churn signals, and retention activity.',
+   'weekly', 6, 20,
+   '[
+     {"key":"complaints_received","title":"Complaints Received"},
+     {"key":"complaints_resolved","title":"Complaints Resolved"},
+     {"key":"customers_at_risk","title":"Customers at Risk (churn signals)"},
+     {"key":"tier_upgrades","title":"Loyalty Tier Upgrades"},
+     {"key":"birthdays_this_week","title":"Birthdays This Week"},
+     {"key":"new_customers","title":"New Customers"}
+   ]'::jsonb,
+   true,
+   ARRAY['pdf','html'],
+   true);
+
+-- ============================================================
+-- Seed complete. After bootstrap, the brand schema is functional:
+-- • document numbering ready for all entity types
+-- • loyalty tiers seeded
+-- • full Nigerian retail COA ready
+-- • 12 fiscal periods + year-end period for the current year
+-- • default sales pipeline with 7 stages
+-- • 5 V2.2 service types (cost + turnaround)
+-- • 4 V2.2 performance KPIs (40/25/20/15 weights)
+-- • Nigerian PAYE / Pension / NHF tables (Finance Act current)
+-- • 1 default warehouse location
+-- • 12 expense categories
+-- • 4 starter couriers
+-- • 5 starter email templates
+-- • 8 starter dashboard widgets
+-- • 2 V2.2 weekly auto-reports (Sales + Customer)
+-- ============================================================

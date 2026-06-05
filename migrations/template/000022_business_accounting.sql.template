@@ -1,0 +1,432 @@
+-- ============================================================
+-- TEMPLATE 000022 — Per-business accounting
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.6 — Accounting & Finance.
+--
+-- Two truly independent ledgers (PXG and FLH each have their own
+-- copy of these tables, in their own schema). Inter-company entries
+-- carry intercompany_transaction_id so both sides can be matched
+-- across schemas during reconciliation.
+--
+-- Tables:
+--   account_groups            — top-level grouping (Assets, Liabilities, Equity, Revenue, Expenses)
+--   chart_of_accounts         — the COA, per brand
+--   account_balances          — period-end balances (materialised by trigger)
+--   journal_entries           — header (the "transaction" in accounting terms)
+--   journal_lines             — double-entry rows (debit/credit must balance)
+--   fiscal_periods            — accounting period definitions + close state
+--   tax_filings               — VAT/WHT/PAYE filing records
+--   bank_statements           — bank import header
+--   bank_statement_lines      — individual transactions
+--   bank_reconciliations      — reconciliation runs
+--   bank_reconciliation_matches — statement-line ↔ payment / journal-line matches
+--   fx_revaluation_runs       — periodic FX gain/loss recompute
+--   fx_revaluation_entries    — per-account FX gain/loss line
+-- ============================================================
+
+-- ── account_groups ───────────────────────────────────────
+-- Top-level groups. Each links to the matching IFRS / FIRS category
+-- and a "normal balance" side (Dr or Cr) so the GL knows whether a
+-- positive entry increases or decreases the account.
+CREATE TABLE {{BUSINESS}}.account_groups (
+  group_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_code            TEXT        NOT NULL UNIQUE,            -- '1','2','3','4','5'
+  group_name            TEXT        NOT NULL,                   -- 'Assets','Liabilities','Equity','Revenue','Expenses'
+  group_type            TEXT        NOT NULL
+                        CHECK (group_type IN ('asset','liability','equity','revenue','expense','contra_asset','contra_revenue')),
+  -- Side that increases the balance: 'debit' for assets/expenses, 'credit' for liabilities/equity/revenue
+  normal_balance        TEXT        NOT NULL CHECK (normal_balance IN ('debit','credit')),
+  -- Where it goes in financial statements
+  statement             TEXT        NOT NULL CHECK (statement IN ('balance_sheet','income_statement','cash_flow')),
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_active             BOOLEAN     NOT NULL DEFAULT true
+);
+
+-- ── chart_of_accounts ────────────────────────────────────
+-- Brand-specific. Account codes are conventional (1xxx = assets,
+-- 2xxx = liabilities, 3xxx = equity, 4xxx = revenue, 5xxx = expense).
+CREATE TABLE {{BUSINESS}}.chart_of_accounts (
+  account_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_code          TEXT        NOT NULL UNIQUE,            -- '1100' = Cash at bank
+  account_name          TEXT        NOT NULL,
+  group_id              UUID        NOT NULL REFERENCES {{BUSINESS}}.account_groups (group_id),
+  parent_account_id     UUID        REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE SET NULL,
+  description           TEXT,
+  -- Some accounts are control accounts (e.g. AR Control). Lines may
+  -- only post via a sub-ledger.
+  is_control_account    BOOLEAN     NOT NULL DEFAULT false,
+  control_subledger     TEXT        CHECK (control_subledger IN ('AR','AP','inventory','payroll',NULL)),
+  -- Tax linkage (e.g. "VAT Output" account → 7.5%)
+  tax_code              TEXT,
+  -- Currency for foreign-currency accounts (e.g. USD bank account)
+  account_currency      TEXT        REFERENCES shared.currencies (currency_code),
+  -- Bank linkage for cash accounts → shared.bank_accounts.account_id
+  bank_account_id       UUID,                                   -- soft FK to shared.bank_accounts
+  -- Posting flag — disable to lock historical accounts
+  allow_posting         BOOLEAN     NOT NULL DEFAULT true,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  -- Inter-company specifics: this account is used for booking the
+  -- IC trade. Two accounts typically per partner: receivable + payable.
+  is_intercompany       BOOLEAN     NOT NULL DEFAULT false,
+  intercompany_partner_brand TEXT REFERENCES shared.business_config (business_key) ON DELETE SET NULL,
+  -- Display
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_chart_of_accounts_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.chart_of_accounts
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_coa_group
+  ON {{BUSINESS}}.chart_of_accounts (group_id) WHERE is_active = true;
+CREATE INDEX idx_{{BUSINESS}}_coa_subledger
+  ON {{BUSINESS}}.chart_of_accounts (control_subledger) WHERE is_control_account = true;
+CREATE INDEX idx_{{BUSINESS}}_coa_ic_partner
+  ON {{BUSINESS}}.chart_of_accounts (intercompany_partner_brand) WHERE is_intercompany = true;
+CREATE INDEX idx_{{BUSINESS}}_coa_parent
+  ON {{BUSINESS}}.chart_of_accounts (parent_account_id) WHERE parent_account_id IS NOT NULL;
+
+-- ── fiscal_periods ───────────────────────────────────────
+-- Monthly periods. Status moves: open → closing → closed → adjusted.
+-- A closed period rejects new journal_entries (enforced by trigger).
+CREATE TABLE {{BUSINESS}}.fiscal_periods (
+  period_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  fiscal_year           SMALLINT    NOT NULL,                   -- 2026
+  period_number         SMALLINT    NOT NULL CHECK (period_number BETWEEN 1 AND 13),
+  -- Period 13 = year-end adjustments
+  period_name           TEXT        NOT NULL,                   -- 'May 2026'
+  starts_on             DATE        NOT NULL,
+  ends_on               DATE        NOT NULL,
+  status                TEXT        NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('future','open','closing','closed','adjusted','locked')),
+  closed_by             UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  closed_at             TIMESTAMPTZ,
+  -- The period 1 of next year inherits balances from this period
+  is_year_end           BOOLEAN     NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (fiscal_year, period_number),
+  CONSTRAINT fiscal_period_dates_valid CHECK (ends_on >= starts_on)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_fiscal_periods_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.fiscal_periods
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_fiscal_periods_status
+  ON {{BUSINESS}}.fiscal_periods (status, starts_on);
+CREATE INDEX idx_{{BUSINESS}}_fiscal_periods_year
+  ON {{BUSINESS}}.fiscal_periods (fiscal_year, period_number);
+
+-- ── journal_entries ──────────────────────────────────────
+-- The header for every transaction in the GL. Double-entry rules
+-- enforced by trigger (sum of debits = sum of credits per entry).
+-- Posted entries are immutable.
+CREATE TABLE {{BUSINESS}}.journal_entries (
+  entry_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  entry_number          TEXT        NOT NULL UNIQUE,            -- 'PXG-JE-0001'
+  -- Source of the entry — drives what the lines look like
+  source_type           TEXT        NOT NULL
+                        CHECK (source_type IN ('manual','sales','pos','invoice','payment','purchase',
+                                               'goods_received','payroll','expense','stock_adjustment',
+                                               'fx_revaluation','intercompany','depreciation','accrual',
+                                               'opening_balance','closing','reversal','tax_filing','refund')),
+  source_table          TEXT,                                   -- pointer to originating record
+  source_id             UUID,
+  -- Inter-company linkage
+  intercompany_transaction_id UUID  REFERENCES shared.intercompany_transactions (ic_transaction_id) ON DELETE SET NULL,
+  -- Period
+  fiscal_period_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.fiscal_periods (period_id),
+  posting_date          DATE        NOT NULL,
+  -- Multi-currency context (the transaction's original currency)
+  transaction_currency  TEXT        NOT NULL DEFAULT 'NGN' REFERENCES shared.currencies (currency_code),
+  fx_rate_used          NUMERIC(15,6) NOT NULL DEFAULT 1.000000,
+  -- Description (shown on reports)
+  description           TEXT        NOT NULL,
+  reference             TEXT,                                   -- invoice no, PO no, etc.
+  -- Totals (NGN) — must equal sum of debit/credit lines (trigger-enforced)
+  total_debit_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_credit_ngn      NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','posted','reversed','void')),
+  posted_at             TIMESTAMPTZ,
+  posted_by             UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Reversals
+  reversed_by_entry_id  UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  reverses_entry_id     UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  reversal_reason       TEXT,
+  reversed_at           TIMESTAMPTZ,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_journal_entries_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.journal_entries
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_journal_entries_period
+  ON {{BUSINESS}}.journal_entries (fiscal_period_id, posting_date);
+CREATE INDEX idx_{{BUSINESS}}_journal_entries_source
+  ON {{BUSINESS}}.journal_entries (source_table, source_id) WHERE source_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_journal_entries_ic
+  ON {{BUSINESS}}.journal_entries (intercompany_transaction_id) WHERE intercompany_transaction_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_journal_entries_status
+  ON {{BUSINESS}}.journal_entries (status, posting_date DESC);
+CREATE INDEX idx_{{BUSINESS}}_journal_entries_date
+  ON {{BUSINESS}}.journal_entries (posting_date DESC);
+
+-- ── journal_lines ────────────────────────────────────────
+-- Each line is a debit OR credit (XOR enforced). Sum of all lines'
+-- debits must equal sum of all lines' credits per entry (enforced
+-- by trigger). Lines are immutable once parent is posted.
+CREATE TABLE {{BUSINESS}}.journal_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  entry_id              UUID        NOT NULL REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE CASCADE,
+  account_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.chart_of_accounts (account_id),
+  -- Description (line-specific narrative)
+  description           TEXT,
+  -- Either debit or credit; not both, not neither
+  debit_ngn             NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (debit_ngn >= 0),
+  credit_ngn            NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (credit_ngn >= 0),
+  -- Original currency amounts (for FX-aware reporting)
+  transaction_currency  TEXT        REFERENCES shared.currencies (currency_code),
+  debit_transaction_currency  NUMERIC(14,2),
+  credit_transaction_currency NUMERIC(14,2),
+  -- Optional analytics tags
+  cost_centre           TEXT,
+  project               TEXT,
+  -- Sub-ledger keys (for AR/AP/inventory subledger reconciliation)
+  contact_id            UUID        REFERENCES shared.contacts (contact_id) ON DELETE SET NULL,
+  invoice_id            UUID        REFERENCES {{BUSINESS}}.invoices (invoice_id) ON DELETE SET NULL,
+  -- Display
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  CONSTRAINT journal_line_debit_xor_credit CHECK (
+    (debit_ngn > 0 AND credit_ngn = 0) OR
+    (debit_ngn = 0 AND credit_ngn > 0)
+  )
+);
+CREATE INDEX idx_{{BUSINESS}}_journal_lines_entry
+  ON {{BUSINESS}}.journal_lines (entry_id);
+CREATE INDEX idx_{{BUSINESS}}_journal_lines_account
+  ON {{BUSINESS}}.journal_lines (account_id);
+CREATE INDEX idx_{{BUSINESS}}_journal_lines_contact
+  ON {{BUSINESS}}.journal_lines (contact_id) WHERE contact_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_journal_lines_invoice
+  ON {{BUSINESS}}.journal_lines (invoice_id) WHERE invoice_id IS NOT NULL;
+
+-- ── account_balances ─────────────────────────────────────
+-- Period-end snapshot per (account, period). Maintained by a trigger
+-- when journal entries are posted. Powers fast P&L and balance sheet
+-- queries without scanning the full journal_lines table every time.
+CREATE TABLE {{BUSINESS}}.account_balances (
+  balance_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE CASCADE,
+  fiscal_period_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.fiscal_periods (period_id) ON DELETE CASCADE,
+  -- Period activity
+  opening_balance_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_debit_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_credit_ngn      NUMERIC(14,2) NOT NULL DEFAULT 0,
+  closing_balance_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- For FX accounts: balance in original currency
+  closing_balance_currency TEXT REFERENCES shared.currencies (currency_code),
+  closing_balance_in_currency NUMERIC(14,2),
+  last_movement_at      TIMESTAMPTZ,
+  refreshed_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (account_id, fiscal_period_id)
+);
+CREATE INDEX idx_{{BUSINESS}}_account_balances_period
+  ON {{BUSINESS}}.account_balances (fiscal_period_id);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ BANK STATEMENTS & RECONCILIATION                                   ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+CREATE TABLE {{BUSINESS}}.bank_statements (
+  statement_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  bank_account_id       UUID        NOT NULL,                   -- soft FK to shared.bank_accounts
+  statement_number      TEXT,
+  statement_date        DATE        NOT NULL,
+  period_start          DATE        NOT NULL,
+  period_end            DATE        NOT NULL,
+  currency              TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  opening_balance       NUMERIC(14,2) NOT NULL,
+  closing_balance       NUMERIC(14,2) NOT NULL,
+  total_credits         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_debits          NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Import context
+  source                TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (source IN ('manual','paystack_settlement','strive_connect','nomba','bank_csv','open_banking','pdf_ocr')),
+  source_document_id    UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  imported_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  imported_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status                TEXT        NOT NULL DEFAULT 'imported'
+                        CHECK (status IN ('imported','reconciling','reconciled','disputed'))
+);
+CREATE INDEX idx_{{BUSINESS}}_bank_statements_account_date
+  ON {{BUSINESS}}.bank_statements (bank_account_id, statement_date DESC);
+
+CREATE TABLE {{BUSINESS}}.bank_statement_lines (
+  statement_line_id     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  statement_id          UUID        NOT NULL REFERENCES {{BUSINESS}}.bank_statements (statement_id) ON DELETE CASCADE,
+  -- Transaction
+  transaction_date      DATE        NOT NULL,
+  value_date            DATE,
+  reference             TEXT,
+  narration             TEXT        NOT NULL,
+  -- Either credit or debit
+  credit_amount         NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (credit_amount >= 0),
+  debit_amount          NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (debit_amount >= 0),
+  running_balance       NUMERIC(14,2),
+  -- Reconciliation state
+  status                TEXT        NOT NULL DEFAULT 'unmatched'
+                        CHECK (status IN ('unmatched','partially_matched','matched','ignored','disputed')),
+  notes                 TEXT,
+  CONSTRAINT bank_line_credit_xor_debit CHECK (
+    (credit_amount > 0 AND debit_amount = 0) OR
+    (credit_amount = 0 AND debit_amount > 0)
+  )
+);
+CREATE INDEX idx_{{BUSINESS}}_bank_statement_lines_statement
+  ON {{BUSINESS}}.bank_statement_lines (statement_id, transaction_date);
+CREATE INDEX idx_{{BUSINESS}}_bank_statement_lines_unmatched
+  ON {{BUSINESS}}.bank_statement_lines (transaction_date) WHERE status = 'unmatched';
+
+-- ── bank_reconciliations ─────────────────────────────────
+CREATE TABLE {{BUSINESS}}.bank_reconciliations (
+  reconciliation_id     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  reconciliation_number TEXT        NOT NULL UNIQUE,
+  bank_account_id       UUID        NOT NULL,
+  fiscal_period_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.fiscal_periods (period_id),
+  statement_id          UUID        REFERENCES {{BUSINESS}}.bank_statements (statement_id) ON DELETE SET NULL,
+  -- Snapshot
+  book_balance_ngn      NUMERIC(14,2) NOT NULL,
+  statement_balance_ngn NUMERIC(14,2) NOT NULL,
+  reconciled_balance_ngn NUMERIC(14,2) NOT NULL,
+  variance_ngn          NUMERIC(14,2) GENERATED ALWAYS AS (book_balance_ngn - statement_balance_ngn) STORED,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'in_progress'
+                        CHECK (status IN ('in_progress','completed','disputed','rolled_back')),
+  reconciled_by         UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  reconciled_at         TIMESTAMPTZ,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_bank_reconciliations_period
+  ON {{BUSINESS}}.bank_reconciliations (fiscal_period_id);
+CREATE INDEX idx_{{BUSINESS}}_bank_reconciliations_account
+  ON {{BUSINESS}}.bank_reconciliations (bank_account_id);
+
+CREATE TABLE {{BUSINESS}}.bank_reconciliation_matches (
+  match_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  reconciliation_id     UUID        NOT NULL REFERENCES {{BUSINESS}}.bank_reconciliations (reconciliation_id) ON DELETE CASCADE,
+  statement_line_id     UUID        NOT NULL REFERENCES {{BUSINESS}}.bank_statement_lines (statement_line_id),
+  -- What this statement line matches in the books
+  match_type            TEXT        NOT NULL
+                        CHECK (match_type IN ('sales_order_payment','journal_entry','supplier_invoice_payment',
+                                              'fee','transfer_in','transfer_out','unidentified')),
+  -- Soft references (one set per match_type)
+  sales_order_payment_id UUID       REFERENCES {{BUSINESS}}.sales_order_payments (payment_id) ON DELETE SET NULL,
+  journal_entry_id      UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  amount_matched_ngn    NUMERIC(14,2) NOT NULL,
+  confidence            NUMERIC(3,2),                           -- 0..1; 1 = manual / certain; <1 = auto-suggested
+  matched_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  matched_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_bank_recon_matches_recon
+  ON {{BUSINESS}}.bank_reconciliation_matches (reconciliation_id);
+CREATE INDEX idx_{{BUSINESS}}_bank_recon_matches_line
+  ON {{BUSINESS}}.bank_reconciliation_matches (statement_line_id);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ FX REVALUATION                                                     ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── fx_revaluation_runs ──────────────────────────────────
+-- Periodic recompute of FX gain/loss on accounts denominated in
+-- a non-NGN currency (e.g. USD bank account, GBP-denominated invoice
+-- still open at period end).
+CREATE TABLE {{BUSINESS}}.fx_revaluation_runs (
+  run_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  fiscal_period_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.fiscal_periods (period_id),
+  reval_date            DATE        NOT NULL,
+  -- Snapshot of rates used (so the run is auditable later)
+  rates_used            JSONB       NOT NULL,
+  total_gain_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_loss_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  net_impact_ngn        NUMERIC(14,2) GENERATED ALWAYS AS (total_gain_ngn - total_loss_ngn) STORED,
+  -- Resulting journal_entry that books the impact
+  journal_entry_id      UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','posted','reversed')),
+  run_by                UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  posted_at             TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_fx_reval_runs_period
+  ON {{BUSINESS}}.fx_revaluation_runs (fiscal_period_id);
+
+CREATE TABLE {{BUSINESS}}.fx_revaluation_entries (
+  reval_entry_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.fx_revaluation_runs (run_id) ON DELETE CASCADE,
+  account_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.chart_of_accounts (account_id),
+  account_currency      TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  balance_in_currency   NUMERIC(14,2) NOT NULL,
+  old_rate              NUMERIC(15,6) NOT NULL,
+  new_rate              NUMERIC(15,6) NOT NULL,
+  old_ngn_equivalent    NUMERIC(14,2) NOT NULL,
+  new_ngn_equivalent    NUMERIC(14,2) NOT NULL,
+  delta_ngn             NUMERIC(14,2) GENERATED ALWAYS AS (new_ngn_equivalent - old_ngn_equivalent) STORED,
+  -- Positive delta on an asset = unrealised gain; negative = unrealised loss
+  impact_type           TEXT        NOT NULL CHECK (impact_type IN ('gain','loss','no_change'))
+);
+CREATE INDEX idx_{{BUSINESS}}_fx_reval_entries_run
+  ON {{BUSINESS}}.fx_revaluation_entries (run_id);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ TAX FILINGS                                                        ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── tax_filings ──────────────────────────────────────────
+-- VAT (monthly), WHT (monthly), PAYE (monthly), Annual Returns.
+-- Captures the period summary + the filing submission + acknowledgement.
+CREATE TABLE {{BUSINESS}}.tax_filings (
+  filing_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  filing_number         TEXT        NOT NULL UNIQUE,
+  tax_type              TEXT        NOT NULL CHECK (tax_type IN ('VAT','WHT','PAYE','CIT','EDT','other')),
+  fiscal_period_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.fiscal_periods (period_id),
+  -- Computed totals
+  taxable_amount_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  tax_amount_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','reviewed','filed','paid','overdue','disputed','closed')),
+  due_date              DATE        NOT NULL,
+  filed_at              TIMESTAMPTZ,
+  filed_by              UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  filing_reference      TEXT,                                    -- FIRS acknowledgement number
+  paid_at               TIMESTAMPTZ,
+  payment_reference     TEXT,
+  -- Documents
+  filing_document_id    UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  receipt_document_id   UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_tax_filings_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.tax_filings
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_tax_filings_period
+  ON {{BUSINESS}}.tax_filings (fiscal_period_id, tax_type);
+CREATE INDEX idx_{{BUSINESS}}_tax_filings_due
+  ON {{BUSINESS}}.tax_filings (due_date) WHERE status IN ('draft','reviewed');
+
+-- ============================================================
+-- After 000016..021+022: 60 + 12 = 72 tables
+-- ============================================================

@@ -1,0 +1,377 @@
+-- ============================================================
+-- TEMPLATE 000018 — Per-business CRM
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.1 — Customer Management.
+--
+-- The contact RECORD lives in shared.contacts (one identity across
+-- brands). What lives here is brand-scoped CRM CONTEXT: pipelines,
+-- deals (each in a stage), activities, notes, head measurements,
+-- preferences, churn scores. A customer who buys from both brands
+-- has one shared.contacts row + two crm_deals histories.
+--
+-- Tables:
+--   crm_pipelines       — multiple pipelines per brand (sales, service)
+--   crm_pipeline_stages — stages within a pipeline
+--   crm_deals           — a customer's journey through a pipeline
+--   crm_deal_products   — line items the deal anticipates (for forecasting)
+--   crm_activities      — calls, messages, meetings, follow-ups
+--   crm_notes           — free-form notes attached to a contact/deal
+--   customer_preferences — wig preferences for curation / curator pick
+--   customer_measurements — head measurements (recurring orders)
+--   churn_risk_scores   — periodically computed; drives win-back workflows
+--   crm_milestones      — birthday, first-purchase anniversary, etc.
+-- ============================================================
+
+-- ── crm_pipelines ────────────────────────────────────────
+-- A brand may have multiple pipelines (e.g. PXG: "Storefront Sales"
+-- and "VIP Custom Orders"; FLH: "Salon Services"). Each pipeline has
+-- its own stage definitions.
+CREATE TABLE {{BUSINESS}}.crm_pipelines (
+  pipeline_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  pipeline_key          TEXT        NOT NULL UNIQUE,            -- 'sales','services','vip','custom_orders'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- For default routing — new deals land here unless overridden
+  is_default            BOOLEAN     NOT NULL DEFAULT false,
+  -- Which pipeline applies to which order type
+  applies_to            TEXT        NOT NULL DEFAULT 'all'
+                        CHECK (applies_to IN ('all','storefront','pos','dispatch','walk_in','custom','services','wholesale')),
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_crm_pipelines_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.crm_pipelines
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_crm_pipelines_default
+  ON {{BUSINESS}}.crm_pipelines (applies_to) WHERE is_default = true;
+
+-- ── crm_pipeline_stages ──────────────────────────────────
+-- Stages within a pipeline. Examples (sales pipeline):
+-- 'new_lead' → 'contacted' → 'quote_sent' → 'payment_pending'
+-- → 'paid' → 'shipped' → 'delivered'.
+-- Terminal stages flag whether they count as won or lost.
+CREATE TABLE {{BUSINESS}}.crm_pipeline_stages (
+  stage_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  pipeline_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.crm_pipelines (pipeline_id) ON DELETE CASCADE,
+  stage_key             TEXT        NOT NULL,                  -- 'new_lead'
+  display_name          TEXT        NOT NULL,                  -- 'New Lead'
+  description           TEXT,
+  -- For visual board ordering (Kanban)
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  colour                TEXT        DEFAULT '#64748B',
+  -- Terminal flags: stage that ends the deal
+  is_terminal           BOOLEAN     NOT NULL DEFAULT false,
+  is_won                BOOLEAN     NOT NULL DEFAULT false,    -- only one "won" per pipeline typically
+  is_lost               BOOLEAN     NOT NULL DEFAULT false,
+  -- Default probability of conversion (used for pipeline-value forecast)
+  win_probability_pct   SMALLINT    NOT NULL DEFAULT 50
+                        CHECK (win_probability_pct BETWEEN 0 AND 100),
+  -- SLA: if a deal sits in this stage for > sla_days, flag it.
+  sla_days              SMALLINT,
+  -- Auto-route: deal entering this stage triggers a workflow_definition
+  -- (e.g. payment_pending → reminder workflow)
+  workflow_trigger_key  TEXT,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (pipeline_id, stage_key)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_crm_pipeline_stages_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.crm_pipeline_stages
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_crm_pipeline_stages_pipeline
+  ON {{BUSINESS}}.crm_pipeline_stages (pipeline_id, display_order);
+
+-- ── crm_deals ────────────────────────────────────────────
+-- A deal is the customer's journey through a pipeline for a
+-- specific opportunity. One contact may have many deals (one per
+-- order opportunity). Once a deal reaches a 'won' terminal stage,
+-- a sales_order is generated and linked back via sales_order_id.
+CREATE TABLE {{BUSINESS}}.crm_deals (
+  deal_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_number           TEXT        NOT NULL UNIQUE,            -- '{{BUSINESS}}'-DEAL-0001
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  pipeline_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.crm_pipelines (pipeline_id),
+  current_stage_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.crm_pipeline_stages (stage_id),
+  -- Display name / title (e.g. "HD Lace Pixie — 18in")
+  title                 TEXT        NOT NULL,
+  description           TEXT,
+  -- Expected revenue in NGN — drives the pipeline-value dashboard
+  expected_value_ngn    NUMERIC(14,2),
+  expected_close_date   DATE,
+  -- Sourcing — which channel created this deal
+  source_channel        TEXT        CHECK (source_channel IN ('instagram','whatsapp','website','walk_in',
+                                                              'referral','campaign','google_ads','meta_ads',
+                                                              'storefront','pos','event','other',NULL)),
+  source_reference      TEXT,                                   -- campaign ID, post ID, referral code
+  -- Assignment
+  assigned_to           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open','won','lost','on_hold','cancelled')),
+  won_at                TIMESTAMPTZ,
+  lost_at               TIMESTAMPTZ,
+  lost_reason           TEXT,
+  -- Conversion: once won, the deal links to its sales_order
+  sales_order_id        UUID,                                   -- soft FK; sales_orders defined in 000019
+  -- Last-touch tracking for SLA / "no contact in N days"
+  last_activity_at      TIMESTAMPTZ,
+  stage_entered_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  is_deleted            BOOLEAN     NOT NULL DEFAULT false,
+  deleted_at            TIMESTAMPTZ
+);
+CREATE TRIGGER trg_{{BUSINESS}}_crm_deals_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.crm_deals
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_contact
+  ON {{BUSINESS}}.crm_deals (contact_id, status);
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_stage
+  ON {{BUSINESS}}.crm_deals (current_stage_id, status) WHERE is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_assigned
+  ON {{BUSINESS}}.crm_deals (assigned_to, status) WHERE assigned_to IS NOT NULL AND is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_open_stale
+  ON {{BUSINESS}}.crm_deals (last_activity_at)
+  WHERE status = 'open' AND is_deleted = false;
+CREATE INDEX idx_{{BUSINESS}}_crm_deals_source
+  ON {{BUSINESS}}.crm_deals (source_channel, created_at DESC)
+  WHERE is_deleted = false;
+
+-- ── crm_deal_stage_history ───────────────────────────────
+-- Append-only log of stage transitions. Powers "time in stage"
+-- analytics, win-rate reports, and the audit trail.
+CREATE TABLE {{BUSINESS}}.crm_deal_stage_history (
+  history_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id               UUID        NOT NULL REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE CASCADE,
+  from_stage_id         UUID        REFERENCES {{BUSINESS}}.crm_pipeline_stages (stage_id) ON DELETE SET NULL,
+  to_stage_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.crm_pipeline_stages (stage_id),
+  moved_by              UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  moved_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- How long the deal spent in the FROM stage
+  time_in_previous_stage_minutes INTEGER,
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_deal_stage_history_deal
+  ON {{BUSINESS}}.crm_deal_stage_history (deal_id, moved_at);
+
+-- ── crm_deal_products ────────────────────────────────────
+-- Anticipated line items. Helps forecast pipeline value by product.
+-- When the deal converts, these become sales_order_lines.
+CREATE TABLE {{BUSINESS}}.crm_deal_products (
+  deal_product_id       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id               UUID        NOT NULL REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE CASCADE,
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE SET NULL,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  -- Custom request (no specific product yet — e.g. "Custom HD Lace")
+  custom_description    TEXT,
+  quantity              INTEGER     NOT NULL DEFAULT 1 CHECK (quantity > 0),
+  unit_price_ngn        NUMERIC(14,2),
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_crm_deal_products_deal
+  ON {{BUSINESS}}.crm_deal_products (deal_id);
+
+-- ── crm_activities ───────────────────────────────────────
+-- Every interaction logged so any teammate can pick up where the
+-- last left off. Activities include calls, messages, meetings, and
+-- system-generated events (e.g. "quote sent", "payment received").
+CREATE TABLE {{BUSINESS}}.crm_activities (
+  activity_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- May be attached to a contact directly OR to a specific deal
+  contact_id            UUID        REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  deal_id               UUID        REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE CASCADE,
+  activity_type         TEXT        NOT NULL
+                        CHECK (activity_type IN (
+                          'call','sms','whatsapp_msg','instagram_dm','email','meeting',
+                          'website_chat','walk_in_visit','quote_sent','payment_received',
+                          'system_note','status_change','follow_up_scheduled','task_created'
+                        )),
+  direction             TEXT        CHECK (direction IN ('inbound','outbound','internal',NULL)),
+  subject               TEXT,
+  body                  TEXT,
+  -- Outcome (sales call) — drives reporting
+  outcome               TEXT        CHECK (outcome IN ('connected','no_answer','left_voicemail',
+                                                       'reschedule_requested','interested','not_interested',
+                                                       'follow_up_required','converted',NULL)),
+  -- Linked external resource
+  external_ref          TEXT,                                  -- WhatsApp msg ID, Instagram conv ID
+  -- For meetings / scheduled calls
+  scheduled_at          TIMESTAMPTZ,
+  duration_minutes      INTEGER,
+  -- Audit
+  performed_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  performed_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT activity_has_target CHECK (contact_id IS NOT NULL OR deal_id IS NOT NULL)
+);
+CREATE INDEX idx_{{BUSINESS}}_crm_activities_contact
+  ON {{BUSINESS}}.crm_activities (contact_id, performed_at DESC)
+  WHERE contact_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_crm_activities_deal
+  ON {{BUSINESS}}.crm_activities (deal_id, performed_at DESC)
+  WHERE deal_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_crm_activities_type
+  ON {{BUSINESS}}.crm_activities (activity_type, performed_at DESC);
+
+-- ── crm_notes ────────────────────────────────────────────
+-- Free-form internal notes. Distinct from activities (which are
+-- objective events). Notes are subjective context: "VIP customer,
+-- always wants HD lace", "Allergic to certain styling chemicals".
+CREATE TABLE {{BUSINESS}}.crm_notes (
+  note_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  deal_id               UUID        REFERENCES {{BUSINESS}}.crm_deals (deal_id) ON DELETE CASCADE,
+  body                  TEXT        NOT NULL,
+  is_pinned             BOOLEAN     NOT NULL DEFAULT false,
+  visibility            TEXT        NOT NULL DEFAULT 'team'
+                        CHECK (visibility IN ('team','managers_only','author_only')),
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT crm_note_has_target CHECK (contact_id IS NOT NULL OR deal_id IS NOT NULL)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_crm_notes_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.crm_notes
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_crm_notes_contact
+  ON {{BUSINESS}}.crm_notes (contact_id) WHERE contact_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_crm_notes_deal
+  ON {{BUSINESS}}.crm_notes (deal_id) WHERE deal_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_crm_notes_pinned
+  ON {{BUSINESS}}.crm_notes (contact_id, created_at DESC) WHERE is_pinned = true;
+
+-- ── customer_preferences ─────────────────────────────────
+-- Wig preferences captured over time. Drives the "Surprise Me" /
+-- curator-pick option in subscription orders and the recommendation
+-- engine on the storefront.
+CREATE TABLE {{BUSINESS}}.customer_preferences (
+  preference_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL UNIQUE REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  -- Wig-attribute preferences (arrays — customer may favour multiple)
+  preferred_textures    TEXT[]      NOT NULL DEFAULT '{}',
+  preferred_lace_types  TEXT[]      NOT NULL DEFAULT '{}',
+  preferred_lengths_in  SMALLINT[]  NOT NULL DEFAULT '{}',
+  preferred_colours     TEXT[]      NOT NULL DEFAULT '{}',
+  preferred_densities   TEXT[]      NOT NULL DEFAULT '{}',
+  preferred_cap_sizes   TEXT[]      NOT NULL DEFAULT '{}',
+  avoid_textures        TEXT[]      NOT NULL DEFAULT '{}',
+  avoid_colours         TEXT[]      NOT NULL DEFAULT '{}',
+  -- Lifestyle / use-case
+  use_cases             TEXT[]      NOT NULL DEFAULT '{}',     -- 'daily','events','professional','sport','wedding'
+  budget_min_ngn        NUMERIC(14,2),
+  budget_max_ngn        NUMERIC(14,2),
+  -- Allergens / sensitivities — important for styling
+  styling_sensitivities TEXT,                                   -- "Allergic to ammonia-based dye"
+  -- How the customer was inferred to prefer this (manual / observed
+  -- from purchase history / asked-in-survey)
+  source                TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (source IN ('manual','observed','survey','curator_pick')),
+  last_observed_at      TIMESTAMPTZ,
+  -- Audit
+  updated_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_customer_preferences_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.customer_preferences
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── customer_measurements ────────────────────────────────
+-- Head measurements for custom wig orders. Multiple records over
+-- time so the customer's profile keeps history (heads can change
+-- with hair loss/growth, weight, etc.).
+CREATE TABLE {{BUSINESS}}.customer_measurements (
+  measurement_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  -- Measurements (in cm)
+  circumference_cm      NUMERIC(5,1),
+  ear_to_ear_cm         NUMERIC(5,1),
+  forehead_to_nape_cm   NUMERIC(5,1),
+  temple_to_temple_cm   NUMERIC(5,1),
+  nape_width_cm         NUMERIC(5,1),
+  -- Other physical context
+  natural_hair_type     TEXT,                                  -- '4A','4B','4C','3A','3B','3C','2A','2B','2C','1','mixed'
+  scalp_notes           TEXT,
+  head_shape_notes      TEXT,
+  -- Photo references (in shared.documents)
+  photo_document_ids    UUID[]      NOT NULL DEFAULT '{}',
+  -- Who took them
+  measured_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  measured_by_stylist_id UUID       REFERENCES shared.stylist_partners (stylist_id) ON DELETE SET NULL,
+  measured_at           DATE        NOT NULL DEFAULT CURRENT_DATE,
+  -- The latest record per contact is "current"; others are history
+  is_current            BOOLEAN     NOT NULL DEFAULT true,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_customer_measurements_contact
+  ON {{BUSINESS}}.customer_measurements (contact_id, measured_at DESC);
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_customer_measurements_current
+  ON {{BUSINESS}}.customer_measurements (contact_id) WHERE is_current = true;
+
+-- ── churn_risk_scores ────────────────────────────────────
+-- Periodically computed by a cron job (signals: days_since_last_order,
+-- order_frequency_delta, engagement_drop, support_complaints).
+-- Tier-1 AI insight; drives "Win-Back" retention workflow (Module 6.23).
+CREATE TABLE {{BUSINESS}}.churn_risk_scores (
+  score_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  -- 0..100. >= 70 = high risk; >= 85 = critical (trigger win-back).
+  risk_score            SMALLINT    NOT NULL CHECK (risk_score BETWEEN 0 AND 100),
+  risk_band             TEXT        NOT NULL
+                        CHECK (risk_band IN ('low','medium','high','critical')),
+  -- Reason codes (1..N): 'no_purchase_90d','engagement_drop','complaint_unresolved','peer_returned'
+  reasons               TEXT[]      NOT NULL DEFAULT '{}',
+  -- Snapshot of contributing factors
+  days_since_last_order INTEGER,
+  lifetime_value_ngn    NUMERIC(14,2),
+  total_orders          INTEGER,
+  average_days_between_orders NUMERIC(8,2),
+  -- Lifecycle
+  computed_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  workflow_triggered_at TIMESTAMPTZ,
+  recovered_at          TIMESTAMPTZ,                            -- customer purchased again
+  superseded_at         TIMESTAMPTZ,                            -- newer score replaces this
+  UNIQUE (contact_id, computed_at)
+);
+CREATE INDEX idx_{{BUSINESS}}_churn_scores_latest
+  ON {{BUSINESS}}.churn_risk_scores (contact_id, computed_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_churn_scores_high_risk
+  ON {{BUSINESS}}.churn_risk_scores (risk_band, computed_at DESC)
+  WHERE risk_band IN ('high','critical') AND superseded_at IS NULL;
+
+-- ── crm_milestones ───────────────────────────────────────
+-- Important dates per customer. Drive automated retention messages
+-- (birthday discount, first-purchase anniversary).
+CREATE TABLE {{BUSINESS}}.crm_milestones (
+  milestone_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id) ON DELETE CASCADE,
+  milestone_type        TEXT        NOT NULL
+                        CHECK (milestone_type IN ('birthday','first_purchase_anniversary','5th_purchase',
+                                                  '10th_purchase','20th_purchase','high_value_threshold',
+                                                  'tier_upgrade','first_referral','custom')),
+  occurs_on             DATE        NOT NULL,                  -- birthday or anniversary date
+  recurs_annually       BOOLEAN     NOT NULL DEFAULT true,
+  last_triggered_at     DATE,
+  next_trigger_at       DATE,
+  -- Action to take (if any) — references a retention workflow rule
+  workflow_rule_key     TEXT,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_crm_milestones_next
+  ON {{BUSINESS}}.crm_milestones (next_trigger_at)
+  WHERE next_trigger_at IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_crm_milestones_contact
+  ON {{BUSINESS}}.crm_milestones (contact_id, milestone_type);
+
+-- ============================================================
+-- Verify after applying 000016+000017+000018:
+--   10 (catalogue) + 10 (stock) + 11 (crm) = 31 tables
+-- ============================================================

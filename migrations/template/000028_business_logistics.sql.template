@@ -1,0 +1,316 @@
+-- ============================================================
+-- TEMPLATE 000028 — Per-business logistics
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.10 — Logistics & Deliveries.
+--
+-- Supports Chowdeck, GIGL, 3PL, DHL/FedEx, and walk-in courier
+-- workflows. Each delivery has full state history, courier webhook
+-- audit, photo proofs, and POD cash collection (when applicable).
+-- The customer-facing tracking page reads from order_timeline_events
+-- (shared) — this template owns the operational logistics record.
+--
+-- Tables:
+--   couriers                  — courier provider definitions per brand
+--   deliveries                — header (one per dispatch)
+--   delivery_items            — line items inside a delivery
+--   delivery_attempts         — each attempt to deliver (success/failure)
+--   delivery_state_history    — audit of state changes
+--   delivery_proofs           — photos / signatures
+--   courier_webhook_events    — raw webhook payloads with parse status
+--   pay_on_delivery_collections — POD cash receipts handed off
+-- ============================================================
+
+-- ── couriers ─────────────────────────────────────────────
+-- Courier provider definitions. The integration layer maps each to
+-- its adapter file in integrations/. Cost-per-kg + base-fee tables
+-- live here for quick rate quotes on the storefront checkout.
+CREATE TABLE {{BUSINESS}}.couriers (
+  courier_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  courier_key           TEXT        NOT NULL UNIQUE,            -- 'chowdeck','gigl','dhl_express','manual','3pl_general'
+  display_name          TEXT        NOT NULL,                   -- 'Chowdeck'
+  description           TEXT,
+  -- Integration
+  integration_type      TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (integration_type IN ('manual','api','webhook_only','partner_portal')),
+  api_endpoint          TEXT,
+  webhook_secret        TEXT,                                    -- AES-256 at app layer
+  -- Service scope
+  serves_local          BOOLEAN     NOT NULL DEFAULT true,      -- intra-Lagos
+  serves_nationwide     BOOLEAN     NOT NULL DEFAULT false,
+  serves_international  BOOLEAN     NOT NULL DEFAULT false,
+  service_countries     TEXT[]      NOT NULL DEFAULT '{NG}',
+  -- Rate cards (kept as JSONB; complex rules with city tiers, weight bands)
+  -- Example: {"flat":1500,"per_kg":500,"city_multipliers":{"lagos":1.0,"abuja":1.4}}
+  rate_card             JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Pay-on-delivery support
+  supports_pod          BOOLEAN     NOT NULL DEFAULT false,
+  pod_fee_pct           NUMERIC(5,2),                            -- courier's fee on POD collections
+  -- Operational
+  default_packaging     TEXT,                                    -- 'small_box','padded_envelope'
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_couriers_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.couriers
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_couriers_active
+  ON {{BUSINESS}}.couriers (display_order) WHERE is_active = true;
+
+-- ── deliveries ───────────────────────────────────────────
+-- One delivery per dispatched order (sometimes multiple deliveries
+-- per order if split across courier services).
+CREATE TABLE {{BUSINESS}}.deliveries (
+  delivery_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_number       TEXT        NOT NULL UNIQUE,            -- 'PXG-DEL-0001'
+  -- The order (soft FK because some deliveries are PO returns / IC transfers)
+  order_id              UUID        REFERENCES {{BUSINESS}}.sales_orders (order_id) ON DELETE SET NULL,
+  -- For non-order deliveries
+  delivery_type         TEXT        NOT NULL DEFAULT 'sales_order'
+                        CHECK (delivery_type IN ('sales_order','intercompany_transfer','stock_transfer',
+                                                  'supplier_return','partner_consignment','sample','other')),
+  reference_type        TEXT,                                    -- 'intercompany_transactions','stock_transfers','purchase_orders'
+  reference_id          UUID,
+  -- Carrier
+  courier_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.couriers (courier_id),
+  courier_tracking_ref  TEXT,                                    -- waybill / tracking #
+  courier_tracking_url  TEXT,                                    -- public courier-side URL
+  -- Origin + destination
+  from_location_id      UUID        REFERENCES {{BUSINESS}}.stock_locations (location_id) ON DELETE SET NULL,
+  recipient_contact_id  UUID        REFERENCES shared.contacts (contact_id) ON DELETE SET NULL,
+  -- Snapshot of recipient details (address can change after delivery)
+  recipient_name_snapshot     TEXT,
+  recipient_phone_snapshot    TEXT,
+  recipient_whatsapp_snapshot TEXT,
+  delivery_address_snapshot   JSONB NOT NULL,
+  delivery_instructions       TEXT,
+  -- Money (courier cost + POD amount expected)
+  courier_fee_ngn       NUMERIC(12,2) NOT NULL DEFAULT 0,
+  is_pay_on_delivery    BOOLEAN     NOT NULL DEFAULT false,
+  pod_amount_expected_ngn NUMERIC(14,2),
+  -- Physical
+  weight_g              INTEGER,
+  package_count         SMALLINT    NOT NULL DEFAULT 1,
+  declared_value_ngn    NUMERIC(14,2),
+  -- ── STATE MACHINE (mirrors order_timeline_events vocabulary)
+  status                TEXT        NOT NULL DEFAULT 'queued'
+                        CHECK (status IN (
+                          'queued',                 -- waiting to be booked
+                          'booked',                 -- courier booked, awaiting pickup
+                          'picked_up',
+                          'in_transit',
+                          'arrived_destination_city',
+                          'out_for_delivery',
+                          'attempted_failed',
+                          'delivered',
+                          'returned_to_sender',
+                          'lost',
+                          'damaged',
+                          'cancelled'
+                        )),
+  -- Key dates
+  booked_at             TIMESTAMPTZ,
+  picked_up_at          TIMESTAMPTZ,
+  expected_delivery_at  TIMESTAMPTZ,
+  delivered_at          TIMESTAMPTZ,
+  returned_at           TIMESTAMPTZ,
+  cancelled_at          TIMESTAMPTZ,
+  cancellation_reason   TEXT,
+  -- Attempt tracking
+  attempt_count         SMALLINT    NOT NULL DEFAULT 0,
+  -- Customer-facing tracking link (mirror of shared.tracking_links for the order)
+  public_tracking_token TEXT,                                    -- denormalised; same token as the order
+  -- Audit
+  notes                 TEXT,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_deliveries_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.deliveries
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_deliveries_order
+  ON {{BUSINESS}}.deliveries (order_id) WHERE order_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_deliveries_status
+  ON {{BUSINESS}}.deliveries (status, expected_delivery_at);
+CREATE INDEX idx_{{BUSINESS}}_deliveries_courier
+  ON {{BUSINESS}}.deliveries (courier_id, status);
+CREATE INDEX idx_{{BUSINESS}}_deliveries_tracking_ref
+  ON {{BUSINESS}}.deliveries (courier_id, courier_tracking_ref)
+  WHERE courier_tracking_ref IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_deliveries_in_flight
+  ON {{BUSINESS}}.deliveries (expected_delivery_at)
+  WHERE status IN ('booked','picked_up','in_transit','out_for_delivery');
+
+-- ── delivery_items ───────────────────────────────────────
+-- Items inside a delivery. For sales orders these mirror sales_order_lines.
+CREATE TABLE {{BUSINESS}}.delivery_items (
+  item_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  -- Linked to source line (sales_order_line, transfer_line, etc.)
+  source_type           TEXT,                                    -- 'sales_order_line','stock_transfer_line','grn_line'
+  source_id             UUID,
+  -- Product
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  description           TEXT        NOT NULL,
+  quantity              INTEGER     NOT NULL CHECK (quantity > 0),
+  weight_g              INTEGER,
+  -- Stock movement that recorded the dispatch
+  stock_movement_id     UUID        REFERENCES {{BUSINESS}}.stock_movements (movement_id) ON DELETE SET NULL,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_delivery_items_delivery
+  ON {{BUSINESS}}.delivery_items (delivery_id);
+
+-- ── delivery_attempts ────────────────────────────────────
+-- Each physical attempt at delivery — drives the "out for delivery
+-- → failed → next-day retry" lifecycle.
+CREATE TABLE {{BUSINESS}}.delivery_attempts (
+  attempt_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  attempt_number        SMALLINT    NOT NULL,
+  attempted_at          TIMESTAMPTZ NOT NULL,
+  -- Outcome
+  outcome               TEXT        NOT NULL
+                        CHECK (outcome IN ('delivered','recipient_unavailable','address_wrong',
+                                          'recipient_refused','locked_premises','rescheduled',
+                                          'lost_in_transit','damaged','other_failure')),
+  outcome_notes         TEXT,
+  -- Captured by courier
+  rider_name            TEXT,
+  rider_phone           TEXT,
+  reported_lat          NUMERIC(10,7),
+  reported_lng          NUMERIC(10,7),
+  -- Linked webhook event if courier auto-reported
+  webhook_event_id      UUID,                                    -- FK wired below
+  -- Audit
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_delivery_attempts_delivery
+  ON {{BUSINESS}}.delivery_attempts (delivery_id, attempted_at);
+
+-- ── delivery_state_history ───────────────────────────────
+-- Append-only state machine audit. Feeds order_timeline_events for
+-- the customer-facing tracking page.
+CREATE TABLE {{BUSINESS}}.delivery_state_history (
+  history_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  from_status           TEXT,
+  to_status             TEXT        NOT NULL,
+  changed_by_source     TEXT        NOT NULL DEFAULT 'user'
+                        CHECK (changed_by_source IN ('user','system','webhook','customer','courier_portal')),
+  changed_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  changed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Originating webhook event
+  webhook_event_id      UUID,
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_delivery_state_history_delivery
+  ON {{BUSINESS}}.delivery_state_history (delivery_id, changed_at);
+
+-- ── delivery_proofs ──────────────────────────────────────
+-- Photos / signatures / ID checks captured at the door. Critical
+-- for disputes.
+CREATE TABLE {{BUSINESS}}.delivery_proofs (
+  proof_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE CASCADE,
+  delivery_attempt_id   UUID        REFERENCES {{BUSINESS}}.delivery_attempts (attempt_id) ON DELETE SET NULL,
+  proof_type            TEXT        NOT NULL
+                        CHECK (proof_type IN ('photo_at_door','signature','recipient_id_photo','sms_otp_confirmed','call_confirmed')),
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  recipient_name        TEXT,
+  recipient_id_type     TEXT,                                    -- 'NIN','drivers_license','staff_id'
+  recipient_id_last4    TEXT,
+  -- For SMS OTP / call confirm
+  otp_code_used         TEXT,                                    -- last 4 digits only; full not stored
+  confirmed_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  captured_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_delivery_proofs_delivery
+  ON {{BUSINESS}}.delivery_proofs (delivery_id);
+CREATE INDEX idx_{{BUSINESS}}_delivery_proofs_attempt
+  ON {{BUSINESS}}.delivery_proofs (delivery_attempt_id) WHERE delivery_attempt_id IS NOT NULL;
+
+-- ── courier_webhook_events ───────────────────────────────
+-- Mirror of shared.webhook_log but scoped to this brand's deliveries.
+-- Lets us replay courier events deterministically and surface raw
+-- payloads on the delivery detail screen for support.
+CREATE TABLE {{BUSINESS}}.courier_webhook_events (
+  event_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Cross-reference to shared.webhook_log if relevant
+  shared_webhook_id     UUID        REFERENCES shared.webhook_log (webhook_id) ON DELETE SET NULL,
+  courier_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.couriers (courier_id),
+  delivery_id           UUID        REFERENCES {{BUSINESS}}.deliveries (delivery_id) ON DELETE SET NULL,
+  -- Event meta
+  external_event_type   TEXT        NOT NULL,                   -- courier's own event name
+  external_event_id     TEXT,
+  -- Normalised mapping to our state machine
+  mapped_to_status      TEXT,
+  -- Payload + parsing
+  payload               JSONB       NOT NULL,
+  signature_valid       BOOLEAN     NOT NULL,
+  processed             BOOLEAN     NOT NULL DEFAULT false,
+  processed_at          TIMESTAMPTZ,
+  processing_error      TEXT,
+  received_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_courier_webhooks_delivery
+  ON {{BUSINESS}}.courier_webhook_events (delivery_id) WHERE delivery_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_courier_webhooks_unprocessed
+  ON {{BUSINESS}}.courier_webhook_events (received_at) WHERE processed = false;
+
+-- Wire deferred FKs
+ALTER TABLE {{BUSINESS}}.delivery_attempts
+  ADD CONSTRAINT fk_{{BUSINESS}}_delivery_attempts_webhook
+    FOREIGN KEY (webhook_event_id) REFERENCES {{BUSINESS}}.courier_webhook_events (event_id) ON DELETE SET NULL;
+ALTER TABLE {{BUSINESS}}.delivery_state_history
+  ADD CONSTRAINT fk_{{BUSINESS}}_delivery_state_history_webhook
+    FOREIGN KEY (webhook_event_id) REFERENCES {{BUSINESS}}.courier_webhook_events (event_id) ON DELETE SET NULL;
+
+-- ── pay_on_delivery_collections ──────────────────────────
+-- When the courier collects cash on delivery, we receive a
+-- remittance from them (often net of their POD fee). This table
+-- records both sides: what the courier owes us vs what they paid us.
+CREATE TABLE {{BUSINESS}}.pay_on_delivery_collections (
+  collection_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_number     TEXT        NOT NULL UNIQUE,            -- 'PXG-POD-0001'
+  delivery_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.deliveries (delivery_id),
+  courier_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.couriers (courier_id),
+  -- Money
+  expected_amount_ngn   NUMERIC(14,2) NOT NULL,
+  collected_amount_ngn  NUMERIC(14,2),
+  courier_fee_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  net_to_us_ngn         NUMERIC(14,2) GENERATED ALWAYS AS (COALESCE(collected_amount_ngn, 0) - courier_fee_ngn) STORED,
+  variance_ngn          NUMERIC(14,2) GENERATED ALWAYS AS (COALESCE(collected_amount_ngn, 0) - expected_amount_ngn) STORED,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','collected_by_courier','remitted','reconciled','disputed','short_paid','written_off')),
+  collected_at          TIMESTAMPTZ,
+  remitted_at           TIMESTAMPTZ,
+  remitted_reference    TEXT,                                    -- bank transfer ref
+  reconciled_at         TIMESTAMPTZ,
+  reconciled_by         UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Linked sales_order_payment created on remittance
+  sales_order_payment_id UUID       REFERENCES {{BUSINESS}}.sales_order_payments (payment_id) ON DELETE SET NULL,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_pod_collections_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.pay_on_delivery_collections
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_pod_collections_delivery
+  ON {{BUSINESS}}.pay_on_delivery_collections (delivery_id);
+CREATE INDEX idx_{{BUSINESS}}_pod_collections_status
+  ON {{BUSINESS}}.pay_on_delivery_collections (status, created_at DESC);
+
+-- ============================================================
+-- After 000016..027+028: 126 + 8 = 134 tables
+-- ============================================================

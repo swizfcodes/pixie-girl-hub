@@ -1,0 +1,2 @@
+# Generic / shared controllers go here.
+# Most controllers live in src/modules/<module>/<module>.controller.js

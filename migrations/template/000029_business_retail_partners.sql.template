@@ -1,0 +1,207 @@
+-- ============================================================
+-- TEMPLATE 000029 — Per-business retail partners
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Wholesale partners, consignment locations, and partner
+-- settlement cycles. PXG ships to retail partners on consignment;
+-- they sell to end customers; PXG raises a settlement invoice
+-- monthly for the units sold.
+--
+-- Tables:
+--   retail_partners            — wholesale partner master
+--   consignment_locations      — partner storage / showroom locations
+--   consignment_stock          — current units at each location
+--   consignment_movements      — append-only ledger of consignment movements
+--   partner_settlements        — monthly settlement header
+--   partner_settlement_lines   — per-unit / per-variant lines
+-- ============================================================
+
+-- ── retail_partners ──────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.retail_partners (
+  partner_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  partner_code          TEXT        NOT NULL UNIQUE,            -- 'RTL-001'
+  contact_id            UUID        NOT NULL UNIQUE REFERENCES shared.contacts (contact_id),
+  display_name          TEXT        NOT NULL,
+  -- Commercial terms (snapshot of agreed deal)
+  margin_share_pct      NUMERIC(5,2) NOT NULL DEFAULT 30.00,    -- % of sale value the partner keeps
+  payment_terms_days    SMALLINT    NOT NULL DEFAULT 30,
+  credit_limit_ngn      NUMERIC(14,2),
+  -- Settlement frequency
+  settlement_frequency  TEXT        NOT NULL DEFAULT 'monthly'
+                        CHECK (settlement_frequency IN ('weekly','fortnightly','monthly','quarterly')),
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('pending_approval','active','suspended','terminated')),
+  onboarded_at          DATE,
+  suspended_at          TIMESTAMPTZ,
+  suspended_reason      TEXT,
+  -- Linked contract document
+  contract_document_id  UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_retail_partners_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.retail_partners
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_retail_partners_status
+  ON {{BUSINESS}}.retail_partners (status) WHERE status = 'active';
+
+-- ── consignment_locations ────────────────────────────────
+-- A retail partner may have multiple physical locations (boutiques,
+-- showrooms). Each one is also a stock_location of type
+-- 'partner_consignment'.
+CREATE TABLE {{BUSINESS}}.consignment_locations (
+  consignment_location_id UUID      PRIMARY KEY DEFAULT gen_random_uuid(),
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id) ON DELETE CASCADE,
+  -- Mirror stock_location for cross-reference
+  stock_location_id     UUID        NOT NULL UNIQUE REFERENCES {{BUSINESS}}.stock_locations (location_id),
+  display_name          TEXT        NOT NULL,
+  address               TEXT,
+  city                  TEXT,
+  state                 TEXT,
+  manager_name          TEXT,
+  manager_phone         TEXT,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_consignment_locations_partner
+  ON {{BUSINESS}}.consignment_locations (partner_id);
+
+-- ── consignment_stock ────────────────────────────────────
+-- Current units at each consignment location. Maintained by trigger
+-- on consignment_movements (analogous to stock_levels).
+CREATE TABLE {{BUSINESS}}.consignment_stock (
+  consignment_stock_id  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  consignment_location_id UUID      NOT NULL REFERENCES {{BUSINESS}}.consignment_locations (consignment_location_id) ON DELETE CASCADE,
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id),
+  variant_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.product_variants (variant_id),
+  -- Quantities
+  qty_on_hand           INTEGER     NOT NULL DEFAULT 0 CHECK (qty_on_hand >= 0),
+  qty_sold_since_last_settlement INTEGER NOT NULL DEFAULT 0,
+  qty_returned_since_last_settlement INTEGER NOT NULL DEFAULT 0,
+  -- Snapshot of agreed retail price at this location
+  agreed_retail_price_ngn NUMERIC(14,2),
+  last_movement_at      TIMESTAMPTZ,
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (consignment_location_id, variant_id)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_consignment_stock_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.consignment_stock
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_consignment_stock_partner
+  ON {{BUSINESS}}.consignment_stock (partner_id, variant_id);
+CREATE INDEX idx_{{BUSINESS}}_consignment_stock_location
+  ON {{BUSINESS}}.consignment_stock (consignment_location_id);
+
+-- ── consignment_movements ────────────────────────────────
+-- Append-only ledger of consignment events.
+CREATE TABLE {{BUSINESS}}.consignment_movements (
+  movement_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  movement_number       TEXT        NOT NULL UNIQUE,            -- 'PXG-CON-0001'
+  consignment_location_id UUID      NOT NULL REFERENCES {{BUSINESS}}.consignment_locations (consignment_location_id),
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id),
+  variant_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.product_variants (variant_id),
+  movement_type         TEXT        NOT NULL
+                        CHECK (movement_type IN ('dispatch_to_partner','partner_sale','partner_return',
+                                                 'partner_damage','partner_count_adjustment','recall_to_warehouse')),
+  -- Signed quantity (positive = added to partner, negative = removed)
+  quantity              INTEGER     NOT NULL CHECK (quantity <> 0),
+  -- Pricing (for sales)
+  unit_retail_price_ngn NUMERIC(14,2),
+  partner_share_ngn     NUMERIC(14,2),
+  brand_share_ngn       NUMERIC(14,2),
+  -- Linked sales record (if partner_sale)
+  reported_sale_at      DATE,
+  reported_customer_name TEXT,
+  -- Settlement linkage (set when this movement is rolled into a settlement)
+  settlement_id         UUID,                                    -- FK wired below
+  -- Stock movement on our side
+  stock_movement_id     UUID        REFERENCES {{BUSINESS}}.stock_movements (movement_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_consignment_movements_partner_loc
+  ON {{BUSINESS}}.consignment_movements (consignment_location_id, recorded_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_consignment_movements_variant
+  ON {{BUSINESS}}.consignment_movements (variant_id);
+CREATE INDEX idx_{{BUSINESS}}_consignment_movements_unsettled
+  ON {{BUSINESS}}.consignment_movements (partner_id, recorded_at)
+  WHERE settlement_id IS NULL AND movement_type IN ('partner_sale','partner_damage');
+
+-- ── partner_settlements ──────────────────────────────────
+-- Monthly settlement run. Aggregates all partner sales for the
+-- period, computes partner share, generates the invoice payable
+-- TO the partner (their share).
+CREATE TABLE {{BUSINESS}}.partner_settlements (
+  settlement_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  settlement_number     TEXT        NOT NULL UNIQUE,            -- 'PXG-SET-0001'
+  partner_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.retail_partners (partner_id),
+  -- Period
+  period_start          DATE        NOT NULL,
+  period_end            DATE        NOT NULL,
+  -- Totals
+  total_gross_sales_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_returns_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_net_sales_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_partner_share_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_brand_share_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_damages_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  units_sold            INTEGER     NOT NULL DEFAULT 0,
+  units_returned        INTEGER     NOT NULL DEFAULT 0,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft','reviewed','approved','invoiced','paid','disputed','closed')),
+  -- Approval / payment
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  paid_at               TIMESTAMPTZ,
+  payment_reference     TEXT,
+  -- Linked invoice (payable to partner)
+  invoice_id            UUID        REFERENCES {{BUSINESS}}.invoices (invoice_id) ON DELETE SET NULL,
+  -- Document
+  settlement_document_id UUID       REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT settlement_period_valid CHECK (period_end >= period_start)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_partner_settlements_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.partner_settlements
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_partner_settlements_partner
+  ON {{BUSINESS}}.partner_settlements (partner_id, period_end DESC);
+CREATE INDEX idx_{{BUSINESS}}_partner_settlements_status
+  ON {{BUSINESS}}.partner_settlements (status, period_end DESC);
+
+ALTER TABLE {{BUSINESS}}.consignment_movements
+  ADD CONSTRAINT fk_{{BUSINESS}}_consignment_movements_settlement
+    FOREIGN KEY (settlement_id) REFERENCES {{BUSINESS}}.partner_settlements (settlement_id) ON DELETE SET NULL;
+
+-- ── partner_settlement_lines ─────────────────────────────
+CREATE TABLE {{BUSINESS}}.partner_settlement_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  settlement_id         UUID        NOT NULL REFERENCES {{BUSINESS}}.partner_settlements (settlement_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  consignment_location_id UUID      REFERENCES {{BUSINESS}}.consignment_locations (consignment_location_id) ON DELETE SET NULL,
+  -- Aggregated quantities + values for this variant at this location
+  units_sold            INTEGER     NOT NULL DEFAULT 0,
+  units_returned        INTEGER     NOT NULL DEFAULT 0,
+  units_damaged         INTEGER     NOT NULL DEFAULT 0,
+  gross_sales_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  partner_share_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  brand_share_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  notes                 TEXT,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_partner_settlement_lines_settlement
+  ON {{BUSINESS}}.partner_settlement_lines (settlement_id);
+
+-- ============================================================
+-- After 000016..028+029: 134 + 6 = 140 tables
+-- ============================================================

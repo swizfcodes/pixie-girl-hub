@@ -1,0 +1,244 @@
+-- ============================================================
+-- TEMPLATE 000032 — Per-business dashboards & reports
+-- Pixie Girl Hub · JBS Praxis · V2.0  (V2.2: weekly auto-reports)
+--
+-- Module 6.20 — Dashboards.
+-- Module 6.30 — Auto-generated weekly reports (replaces Faitlyn's
+-- Saturday 8 PM Zoho/Sheet ritual: Chloe's sales report and
+-- Ifeoluwa's customer report).
+--
+-- Tables:
+--   dashboard_configs       — per-user dashboard layouts
+--   dashboard_widgets       — widgets pinned to a dashboard
+--   saved_reports           — saved query/filter definitions
+--   report_templates        — system templates (incl. the V2.2 weekly reports)
+--   report_runs             — execution log
+--   report_run_outputs      — generated outputs (PDF / CSV / data payload)
+-- ============================================================
+
+-- ── dashboard_configs ────────────────────────────────────
+-- A user's named dashboard layout. A user may have multiple
+-- dashboards ("Daily Ops", "Weekly Review", "Owner View").
+CREATE TABLE {{BUSINESS}}.dashboard_configs (
+  dashboard_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id               UUID        REFERENCES shared.users (user_id) ON DELETE CASCADE,
+  -- NULL user_id = shared (role-based) dashboard
+  role_id               UUID        REFERENCES shared.roles (role_id) ON DELETE CASCADE,
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Layout (grid coords for widgets stored alongside widget id)
+  -- [{widget_id, x, y, w, h}, ...]
+  layout                JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  -- Default flag — which dashboard loads on login
+  is_default            BOOLEAN     NOT NULL DEFAULT false,
+  is_shared             BOOLEAN     NOT NULL DEFAULT false,    -- visible to others
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT dashboard_has_owner CHECK (user_id IS NOT NULL OR role_id IS NOT NULL)
+);
+CREATE TRIGGER trg_{{BUSINESS}}_dashboard_configs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.dashboard_configs
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_dashboard_configs_user
+  ON {{BUSINESS}}.dashboard_configs (user_id) WHERE user_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_dashboard_configs_user_default
+  ON {{BUSINESS}}.dashboard_configs (user_id) WHERE is_default = true AND user_id IS NOT NULL;
+
+-- ── dashboard_widgets ────────────────────────────────────
+-- A widget = one chart/KPI/list/feed. Stored separately so a widget
+-- can be defined once and reused across dashboards.
+CREATE TABLE {{BUSINESS}}.dashboard_widgets (
+  widget_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  widget_key            TEXT        NOT NULL UNIQUE,            -- 'sales_today','low_stock_count','open_invoices_total'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- What kind of widget
+  widget_type           TEXT        NOT NULL
+                        CHECK (widget_type IN ('kpi_number','kpi_with_delta','line_chart','bar_chart',
+                                               'pie_chart','gauge','list','feed','calendar','funnel','heatmap')),
+  -- What it shows — references either a saved_report or a parametric query
+  query_type            TEXT        NOT NULL DEFAULT 'sql'
+                        CHECK (query_type IN ('sql','saved_report','module_built_in')),
+  -- For sql: the actual query (read-only; service validates)
+  sql_query             TEXT,
+  -- For saved_report
+  saved_report_id       UUID,                                   -- FK wired below
+  -- For module_built_in: which built-in
+  module_key            TEXT,                                   -- e.g. 'sales.today','stock.low'
+  -- Refresh policy
+  refresh_seconds       INTEGER     NOT NULL DEFAULT 300,
+  -- Display config (axes, colours, format)
+  display_config        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Permission to view
+  required_permission   TEXT,                                   -- module.action key
+  -- Lifecycle
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  is_system_widget      BOOLEAN     NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_dashboard_widgets_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.dashboard_widgets
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_dashboard_widgets_type
+  ON {{BUSINESS}}.dashboard_widgets (widget_type) WHERE is_active = true;
+
+-- ── saved_reports ────────────────────────────────────────
+-- User-defined or template-derived report definitions. A "save" is
+-- a query + filter + grouping snapshot the user can re-run.
+CREATE TABLE {{BUSINESS}}.saved_reports (
+  report_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_key            TEXT        NOT NULL UNIQUE,
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Domain: which module/area
+  report_category       TEXT        NOT NULL
+                        CHECK (report_category IN ('sales','crm','stock','accounting','payroll',
+                                                   'expenses','purchasing','production','retention',
+                                                   'marketing','staff','customer','operational','custom')),
+  -- Owner
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  is_shared             BOOLEAN     NOT NULL DEFAULT false,
+  shared_with_role_ids  UUID[]      NOT NULL DEFAULT '{}',
+  -- Definition
+  base_query_key        TEXT,                                   -- e.g. 'sales.orders_by_period'
+  -- Filters / parameters / grouping config
+  config                JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Output preferences
+  default_format        TEXT        NOT NULL DEFAULT 'pdf'
+                        CHECK (default_format IN ('pdf','csv','xlsx','json','html')),
+  -- Lifecycle
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  last_run_at           TIMESTAMPTZ,
+  total_runs            INTEGER     NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_saved_reports_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.saved_reports
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_saved_reports_category
+  ON {{BUSINESS}}.saved_reports (report_category) WHERE is_active = true;
+CREATE INDEX idx_{{BUSINESS}}_saved_reports_owner
+  ON {{BUSINESS}}.saved_reports (created_by) WHERE created_by IS NOT NULL;
+
+ALTER TABLE {{BUSINESS}}.dashboard_widgets
+  ADD CONSTRAINT fk_{{BUSINESS}}_dashboard_widgets_report
+    FOREIGN KEY (saved_report_id) REFERENCES {{BUSINESS}}.saved_reports (report_id) ON DELETE SET NULL;
+
+-- ── report_templates ─────────────────────────────────────
+-- System-defined report templates that auto-populate from logged
+-- data. V2.2 §6.30 introduces two flagship ones: the weekly Sales
+-- Report (replaces Chloe's Saturday process) and the weekly
+-- Customer Report (replaces Ifeoluwa's). Both include:
+--   - New leads by channel
+--   - Quotes sent
+--   - Orders confirmed / fulfilled
+--   - Deals lost (with reasons)
+--   - Complaints and resolutions
+--   - Outstanding follow-ups
+-- Each section is a query that the report engine runs and slots
+-- into a template at render time. Staff review and confirm; CEO gets
+-- the consistent report.
+CREATE TABLE {{BUSINESS}}.report_templates (
+  template_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_key          TEXT        NOT NULL UNIQUE,            -- 'weekly_sales','weekly_customer','monthly_pnl'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Cadence
+  cadence               TEXT        NOT NULL
+                        CHECK (cadence IN ('daily','weekly','monthly','quarterly','annual','on_demand','custom')),
+  -- For weekly: day of week (0=Sun, 6=Sat). V2.2 Faitlyn report: Saturday.
+  scheduled_day_of_week SMALLINT    CHECK (scheduled_day_of_week BETWEEN 0 AND 6),
+  scheduled_hour        SMALLINT    CHECK (scheduled_hour BETWEEN 0 AND 23),
+  -- Audience
+  default_recipient_role_ids UUID[] NOT NULL DEFAULT '{}',
+  cc_recipient_user_ids UUID[]      NOT NULL DEFAULT '{}',
+  -- Sections (ordered list of queries to run)
+  -- [{"key":"new_leads_by_channel","title":"New Leads by Channel","query":"...","format":"table"}, ...]
+  sections              JSONB       NOT NULL,
+  -- Format
+  output_formats        TEXT[]      NOT NULL DEFAULT '{pdf,html}',
+  -- Optional: confirmation step where staff review before send
+  requires_staff_confirmation BOOLEAN NOT NULL DEFAULT true,
+  confirmation_role_ids UUID[]      NOT NULL DEFAULT '{}',
+  -- Delivery
+  delivery_method       TEXT[]      NOT NULL DEFAULT '{email,in_app}',
+  -- Lifecycle
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  is_system_template    BOOLEAN     NOT NULL DEFAULT false,
+  last_run_at           TIMESTAMPTZ,
+  next_run_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_report_templates_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.report_templates
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_report_templates_next_run
+  ON {{BUSINESS}}.report_templates (next_run_at) WHERE is_active = true;
+
+-- ── report_runs ──────────────────────────────────────────
+-- An execution of a saved_report or a report_template.
+CREATE TABLE {{BUSINESS}}.report_runs (
+  run_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_number            TEXT        NOT NULL UNIQUE,            -- 'PXG-RPT-0001'
+  -- Either a saved report OR a template (XOR)
+  saved_report_id       UUID        REFERENCES {{BUSINESS}}.saved_reports (report_id) ON DELETE SET NULL,
+  report_template_id    UUID        REFERENCES {{BUSINESS}}.report_templates (template_id) ON DELETE SET NULL,
+  -- Period covered
+  period_start          TIMESTAMPTZ,
+  period_end            TIMESTAMPTZ,
+  -- Parameters used (snapshot)
+  parameters            JSONB,
+  -- Trigger
+  triggered_by          TEXT        NOT NULL DEFAULT 'manual'
+                        CHECK (triggered_by IN ('manual','scheduled','ai_insights','workflow','api')),
+  triggered_by_user_id  UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','running','completed','failed','needs_confirmation','confirmed','sent','cancelled')),
+  started_at            TIMESTAMPTZ,
+  completed_at          TIMESTAMPTZ,
+  failure_reason        TEXT,
+  rows_returned         INTEGER,
+  execution_duration_ms INTEGER,
+  -- Confirmation step (for templates that require it)
+  confirmed_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  confirmed_at          TIMESTAMPTZ,
+  confirmation_notes    TEXT,
+  -- Delivery
+  delivered_at          TIMESTAMPTZ,
+  delivery_recipients   TEXT[]      NOT NULL DEFAULT '{}',
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_report_runs_template
+  ON {{BUSINESS}}.report_runs (report_template_id, created_at DESC)
+  WHERE report_template_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_report_runs_status
+  ON {{BUSINESS}}.report_runs (status, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_report_runs_needs_confirmation
+  ON {{BUSINESS}}.report_runs (created_at DESC) WHERE status = 'needs_confirmation';
+
+-- ── report_run_outputs ───────────────────────────────────
+-- The actual generated files / payloads.
+CREATE TABLE {{BUSINESS}}.report_run_outputs (
+  output_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.report_runs (run_id) ON DELETE CASCADE,
+  format                TEXT        NOT NULL CHECK (format IN ('pdf','csv','xlsx','json','html','png')),
+  -- Either a file in shared.documents or inline payload
+  document_id           UUID        REFERENCES shared.documents (document_id) ON DELETE SET NULL,
+  inline_payload        JSONB,                                   -- for JSON/small HTML
+  -- Stats
+  file_size_bytes       INTEGER,
+  -- Audit
+  generated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_report_run_outputs_run
+  ON {{BUSINESS}}.report_run_outputs (run_id);
+
+-- ============================================================
+-- After 000016..031+032: 152 + 6 = 158 tables
+-- ============================================================

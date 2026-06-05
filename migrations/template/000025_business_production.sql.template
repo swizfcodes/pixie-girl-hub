@@ -1,0 +1,542 @@
+-- ============================================================
+-- TEMPLATE 000025 — Per-business production + landed cost + Faitlyn Service Jobs
+-- Pixie Girl Hub · JBS Praxis · V2.0  (with V2.2 additions)
+--
+-- Module 6.24 — Production & Landed Cost.
+--
+-- Two interlocking concerns:
+--
+-- A) PRODUCTION (PXG-relevant)
+--    A production_run tracks a batch from China factory through
+--    customs clearance into Lagos warehouse. Every cost incurred
+--    along the way (raw hair, factory labour, freight, customs,
+--    3PL, styling, packaging) is captured against the run and
+--    rolled up per unit. The per-unit landed_cost_ngn becomes the
+--    canonical cost basis for pricing, COGS, and IC min-margin.
+--
+-- B) SERVICE JOB TRACKER (V2.2 §6.24 — Faitlyn-relevant)
+--    Digitises Faitlyn's "Hair Assignment Register": which hair
+--    unit is with which stylist, for what service, at what status.
+--    Five-item service taxonomy: Installation, Revamping, Colour
+--    Creation, Customization, Packing. Each has standard cost,
+--    turnaround, and (for colour) chemical recipe.
+--    Per V2.2: a service with no matching recorded sale/payment
+--    is flagged by AI Insights (anti-"pocketing").
+--    Same tables exist in PXG's schema but stay empty (PXG does
+--    not run salon services).
+--
+-- Tables:
+--   funding_sources              — FX-tracked cash sources for paying factories
+--   production_runs              — batch header with state machine
+--   production_run_units         — unit-level tracking (each wig in the run)
+--   cost_components              — every cost added to a run (FX-aware)
+--   landed_cost_breakdown        — per-unit roll-up snapshot
+--   rework_events                — re-work / redo cycles within a run
+--   service_types                — taxonomy (Install/Revamp/Colour/Custom/Pack)
+--   chemical_recipes             — Colour Creation recipes
+--   service_jobs                 — Hair Assignment Register entries
+--   service_job_chemicals        — chemicals consumed per job
+--   monthly_chemical_reconciliations — month-end usage vs purchase
+-- ============================================================
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ FUNDING SOURCES                                                    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── funding_sources ──────────────────────────────────────
+-- Each time the company pays a factory, the funding event is logged
+-- here with the actual NGN → USD/RMB cash conversion that occurred.
+-- This captures the "true funding rate" required by V2.2 §6.24 — the
+-- per-unit landed cost uses the rate at which we actually parted
+-- with Naira, not a generic FX-mid rate.
+CREATE TABLE {{BUSINESS}}.funding_sources (
+  funding_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  funding_number        TEXT        NOT NULL UNIQUE,            -- 'PXG-FND-0001'
+  -- Cash source
+  source_account_id     UUID,                                    -- soft FK to shared.bank_accounts
+  -- The conversion chain
+  ngn_amount            NUMERIC(14,2) NOT NULL CHECK (ngn_amount > 0),
+  intermediate_currency TEXT        REFERENCES shared.currencies (currency_code),
+  intermediate_amount   NUMERIC(14,2),                          -- e.g. USD bought with NGN
+  final_currency        TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  final_amount          NUMERIC(14,2) NOT NULL,                 -- e.g. RMB sent to factory
+  -- Effective rates
+  ngn_to_intermediate_rate NUMERIC(15,6),
+  intermediate_to_final_rate NUMERIC(15,6),
+  ngn_to_final_effective_rate NUMERIC(15,6) NOT NULL,           -- the headline figure
+  -- Costs incurred during conversion
+  fx_fees_ngn           NUMERIC(14,2) NOT NULL DEFAULT 0,
+  transfer_fees_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_landed_cost_ngn NUMERIC(14,2) GENERATED ALWAYS AS (ngn_amount + fx_fees_ngn + transfer_fees_ngn) STORED,
+  -- Recipient
+  recipient_name        TEXT,                                   -- "Guangzhou Hair Factory"
+  recipient_country     TEXT,
+  payment_method        TEXT        CHECK (payment_method IN ('swift','bdc','western_union','crypto','payoneer','other',NULL)),
+  -- Audit
+  funded_at             DATE        NOT NULL,
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- Available pool — drawn down as production_runs consume it
+  amount_consumed_final NUMERIC(14,2) NOT NULL DEFAULT 0,
+  amount_remaining_final NUMERIC(14,2) GENERATED ALWAYS AS (final_amount - amount_consumed_final) STORED,
+  is_depleted           BOOLEAN     NOT NULL DEFAULT false,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_funding_sources_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.funding_sources
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_funding_sources_available
+  ON {{BUSINESS}}.funding_sources (final_currency, funded_at DESC)
+  WHERE is_depleted = false;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ PRODUCTION RUNS                                                    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── production_runs ──────────────────────────────────────
+-- A production run is one batch from one factory. State machine
+-- matches inbound_shipments and purchase_orders.status one-for-one.
+CREATE TABLE {{BUSINESS}}.production_runs (
+  run_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_number            TEXT        NOT NULL UNIQUE,            -- 'PXG-RUN-0001'
+  -- Origin
+  po_id                 UUID        REFERENCES {{BUSINESS}}.purchase_orders (po_id) ON DELETE SET NULL,
+  inbound_shipment_id   UUID        REFERENCES {{BUSINESS}}.inbound_shipments (shipment_id) ON DELETE SET NULL,
+  supplier_id           UUID        REFERENCES {{BUSINESS}}.suppliers (supplier_id) ON DELETE SET NULL,
+  -- Header
+  title                 TEXT        NOT NULL,
+  -- State machine
+  status                TEXT        NOT NULL DEFAULT 'planned'
+                        CHECK (status IN (
+                          'planned',
+                          'funded',            -- payment sent to factory
+                          'in_production',
+                          'quality_check',
+                          'ready_to_ship',
+                          'in_transit',
+                          'arrived_lagos',
+                          'cleared_customs',
+                          'received',
+                          'styled',            -- went through Flow-1 styling (FLH IC)
+                          'closed',            -- all units sold / written off
+                          'cancelled'
+                        )),
+  -- Quantities (rolled from production_run_units)
+  units_planned         INTEGER     NOT NULL DEFAULT 0,
+  units_produced        INTEGER     NOT NULL DEFAULT 0,
+  units_passed_qc       INTEGER     NOT NULL DEFAULT 0,
+  units_rejected        INTEGER     NOT NULL DEFAULT 0,
+  units_received        INTEGER     NOT NULL DEFAULT 0,
+  -- Cost roll-up (sum of cost_components)
+  total_factory_cost_ngn NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_freight_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_customs_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_3pl_lagos_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_styling_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_packaging_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_wastage_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_other_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  total_landed_cost_ngn NUMERIC(14,2) GENERATED ALWAYS AS (
+    total_factory_cost_ngn + total_freight_ngn + total_customs_ngn +
+    total_3pl_lagos_ngn + total_styling_ngn + total_packaging_ngn +
+    total_wastage_ngn + total_other_ngn
+  ) STORED,
+  -- Per-unit landed cost (snapshot — recomputed by cron / on event)
+  per_unit_cost_ngn     NUMERIC(14,2),
+  cost_last_recomputed_at TIMESTAMPTZ,
+  -- Effective funding rate (the "true" NGN-to-factory-currency rate
+  -- used for this run, blended from funding_sources)
+  effective_funding_rate NUMERIC(15,6),
+  funding_currency      TEXT        REFERENCES shared.currencies (currency_code),
+  -- Dates
+  planned_start_date    DATE,
+  actual_start_date     DATE,
+  expected_ready_date   DATE,
+  actual_ready_date     DATE,
+  expected_arrival_date DATE,
+  actual_arrival_date   DATE,
+  closed_at             TIMESTAMPTZ,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_production_runs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.production_runs
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_production_runs_status
+  ON {{BUSINESS}}.production_runs (status, expected_arrival_date);
+CREATE INDEX idx_{{BUSINESS}}_production_runs_po
+  ON {{BUSINESS}}.production_runs (po_id) WHERE po_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_production_runs_shipment
+  ON {{BUSINESS}}.production_runs (inbound_shipment_id) WHERE inbound_shipment_id IS NOT NULL;
+
+-- Wire deferred FK on po_lines.production_run_id
+ALTER TABLE {{BUSINESS}}.po_lines
+  ADD CONSTRAINT fk_{{BUSINESS}}_po_lines_production_run
+    FOREIGN KEY (production_run_id) REFERENCES {{BUSINESS}}.production_runs (run_id) ON DELETE SET NULL;
+
+-- ── production_run_units ─────────────────────────────────
+-- One row per unit (wig) being produced. Tracks each unit's journey
+-- through QC, customs, and (for Flow-1) styling. This is the
+-- granularity the V2.2 spec demands — "every wig from raw hair…
+-- through Lagos styling".
+CREATE TABLE {{BUSINESS}}.production_run_units (
+  unit_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  unit_code             TEXT        NOT NULL UNIQUE,            -- 'PXG-RUN-0001-001'
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.production_runs (run_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  -- Final SKU once received (matches the variant SKU; this stays
+  -- denormalised for run-level reporting even if variant is renamed)
+  sku_snapshot          TEXT,
+  -- Unit-level state (may move ahead of the run if QC'd individually)
+  status                TEXT        NOT NULL DEFAULT 'planned'
+                        CHECK (status IN ('planned','in_production','qc_pass','qc_fail',
+                                          'in_transit','arrived','styled','received','rejected','reworked')),
+  -- Allocated per-unit costs (computed from cost_components allocation)
+  factory_cost_ngn      NUMERIC(14,2),
+  freight_allocated_ngn NUMERIC(14,2),
+  customs_allocated_ngn NUMERIC(14,2),
+  styling_cost_ngn      NUMERIC(14,2),
+  other_allocated_ngn   NUMERIC(14,2),
+  total_landed_cost_ngn NUMERIC(14,2),
+  -- For Flow-1 styling: linked intercompany transaction (the FLH invoice)
+  styling_intercompany_id UUID      REFERENCES shared.intercompany_transactions (ic_transaction_id) ON DELETE SET NULL,
+  -- For dispatched-as-styled custom orders: linked service_job (FLH)
+  service_job_id        UUID,                                    -- FK wired below
+  -- Custom-order linkage: this unit is for a specific customer
+  custom_order_line_id  UUID        REFERENCES {{BUSINESS}}.sales_order_lines (line_id) ON DELETE SET NULL,
+  -- Stock-in event (when received)
+  stock_movement_id     UUID        REFERENCES {{BUSINESS}}.stock_movements (movement_id) ON DELETE SET NULL,
+  -- Audit
+  produced_at           TIMESTAMPTZ,
+  qc_at                 TIMESTAMPTZ,
+  qc_notes              TEXT,
+  rejected_reason       TEXT,
+  received_at           TIMESTAMPTZ,
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_production_run_units_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.production_run_units
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_production_run_units_run
+  ON {{BUSINESS}}.production_run_units (run_id, status);
+CREATE INDEX idx_{{BUSINESS}}_production_run_units_variant
+  ON {{BUSINESS}}.production_run_units (variant_id) WHERE variant_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_production_run_units_custom_order
+  ON {{BUSINESS}}.production_run_units (custom_order_line_id) WHERE custom_order_line_id IS NOT NULL;
+
+-- ── cost_components ──────────────────────────────────────
+-- APPEND-ONLY ledger of every cost added to a run. Components are
+-- summed (with FX conversion at funding rate) into the run's roll-up.
+-- The classification drives the breakdown view.
+CREATE TABLE {{BUSINESS}}.cost_components (
+  component_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.production_runs (run_id) ON DELETE CASCADE,
+  -- Cost classification
+  cost_type             TEXT        NOT NULL
+                        CHECK (cost_type IN (
+                          'factory_unit_cost',   -- per-unit price from factory
+                          'factory_overhead',    -- factory labour/overhead allocation
+                          'raw_hair',            -- direct raw material
+                          'freight_international', -- factory → port → Lagos
+                          'customs_duty',
+                          'customs_clearing_fee',
+                          'port_storage',        -- demurrage / port storage fees (Amendment-7)
+                          '3pl_lagos',           -- 3PL pickup at port
+                          'styling_intercompany',-- FLH styling invoice (Flow 1)
+                          'packaging',
+                          'quality_inspection',  -- third-party QC
+                          'wastage',             -- rejected units cost
+                          'samples',             -- given as samples / influencer seeding
+                          'misc'
+                        )),
+  -- Amount in original currency
+  amount                NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  currency              TEXT        NOT NULL REFERENCES shared.currencies (currency_code),
+  -- Allocation: how many units this component covers
+  -- (used by the roll-up to allocate per-unit costs)
+  applies_to_units      INTEGER,                                 -- NULL = entire run; integer = specific count
+  -- FX context
+  funding_source_id     UUID        REFERENCES {{BUSINESS}}.funding_sources (funding_id) ON DELETE SET NULL,
+  fx_rate_used          NUMERIC(15,6) NOT NULL DEFAULT 1.000000,
+  amount_ngn            NUMERIC(14,2) NOT NULL,
+  -- Source linkage
+  source_type           TEXT,                                   -- 'supplier_invoice','expense','intercompany','manual'
+  source_id             UUID,
+  invoice_reference     TEXT,                                   -- supplier invoice / IC invoice number
+  -- Date incurred
+  incurred_at           DATE        NOT NULL,
+  -- Audit
+  description           TEXT,
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_cost_components_run
+  ON {{BUSINESS}}.cost_components (run_id, cost_type);
+CREATE INDEX idx_{{BUSINESS}}_cost_components_funding
+  ON {{BUSINESS}}.cost_components (funding_source_id) WHERE funding_source_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_cost_components_source
+  ON {{BUSINESS}}.cost_components (source_type, source_id) WHERE source_id IS NOT NULL;
+
+-- ── landed_cost_breakdown ────────────────────────────────
+-- Snapshot of per-unit landed cost, with the full breakdown that
+-- produced it. Recomputed by cron job and on milestone events
+-- (run state change, new cost component added). Append-only so
+-- historical pricing decisions remain traceable.
+CREATE TABLE {{BUSINESS}}.landed_cost_breakdown (
+  breakdown_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.production_runs (run_id) ON DELETE CASCADE,
+  -- Snapshot timestamp + reason
+  computed_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  computed_reason       TEXT,                                   -- 'state_change','new_cost','manual_refresh','closing'
+  -- Aggregates (NGN)
+  factory_cost_total_ngn    NUMERIC(14,2) NOT NULL DEFAULT 0,
+  freight_total_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  customs_total_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  lagos_3pl_total_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  styling_total_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  packaging_total_ngn       NUMERIC(14,2) NOT NULL DEFAULT 0,
+  wastage_total_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,
+  other_total_ngn           NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Total + per-unit
+  total_landed_cost_ngn     NUMERIC(14,2) NOT NULL,
+  units_in_run              INTEGER     NOT NULL,
+  per_unit_landed_cost_ngn  NUMERIC(14,2) NOT NULL,
+  -- FX context summary
+  weighted_avg_fx_rate      NUMERIC(15,6),
+  funding_currency          TEXT REFERENCES shared.currencies (currency_code),
+  -- Notes about variance vs previous snapshot
+  variance_from_previous_pct NUMERIC(7,4),
+  is_latest             BOOLEAN     NOT NULL DEFAULT true
+);
+CREATE INDEX idx_{{BUSINESS}}_landed_cost_breakdown_run
+  ON {{BUSINESS}}.landed_cost_breakdown (run_id, computed_at DESC);
+CREATE UNIQUE INDEX idx_{{BUSINESS}}_landed_cost_breakdown_latest
+  ON {{BUSINESS}}.landed_cost_breakdown (run_id) WHERE is_latest = true;
+
+-- ── rework_events ────────────────────────────────────────
+-- When a unit fails QC and is reworked rather than rejected. Each
+-- rework adds cost back into the run.
+CREATE TABLE {{BUSINESS}}.rework_events (
+  rework_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  unit_id               UUID        NOT NULL REFERENCES {{BUSINESS}}.production_run_units (unit_id) ON DELETE CASCADE,
+  run_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.production_runs (run_id),
+  reason                TEXT        NOT NULL,
+  qc_finding            TEXT,
+  -- Cost incurred (creates a matching cost_components row of type 'wastage' or 'misc')
+  extra_cost_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  cost_component_id     UUID        REFERENCES {{BUSINESS}}.cost_components (component_id) ON DELETE SET NULL,
+  -- Time impact
+  delay_days            SMALLINT,
+  rework_completed_at   TIMESTAMPTZ,
+  outcome               TEXT        CHECK (outcome IN ('passed','still_failing','scrapped',NULL)),
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_rework_events_unit
+  ON {{BUSINESS}}.rework_events (unit_id);
+CREATE INDEX idx_{{BUSINESS}}_rework_events_run
+  ON {{BUSINESS}}.rework_events (run_id, recorded_at DESC);
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ FAITLYN SERVICE JOB TRACKER (V2.2 §6.24)                          ║
+-- ║ — Digital replacement for the manual "Hair Assignment Register"    ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── service_types ────────────────────────────────────────
+-- The five-item taxonomy from V2.2. Each carries its standard
+-- cost, turnaround, and (for Colour Creation) chemical recipe key.
+CREATE TABLE {{BUSINESS}}.service_types (
+  service_type_id       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_key           TEXT        NOT NULL UNIQUE,
+  -- Standard keys: 'installation','revamping','colour_creation','customization','packing'
+  -- Extensible: brand can add new service types
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Standard pricing (the basis for intercompany styling invoices)
+  standard_cost_ngn     NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Turnaround in business days (drives expected_completion_at on jobs)
+  standard_turnaround_days SMALLINT,
+  -- For 'colour_creation', a default recipe (override-able per job)
+  default_recipe_id     UUID,                                    -- FK wired below
+  -- Default GL account for the cost (PXG side) / revenue (FLH side)
+  default_account_id    UUID        REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE SET NULL,
+  -- Sequence for UI listing
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_service_types_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.service_types
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── chemical_recipes ─────────────────────────────────────
+-- Colour Creation recipes. Stores the exact mix and quantities.
+-- "Reads-from-tracker" reports use these to project chemical usage
+-- before a month opens, then compare to actual consumption.
+CREATE TABLE {{BUSINESS}}.chemical_recipes (
+  recipe_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  recipe_key            TEXT        NOT NULL UNIQUE,
+  display_name          TEXT        NOT NULL,                  -- 'Warm Honey Blonde',
+  -- Ingredients: [{chemical_name, brand, sku, qty_ml, qty_g, role}, ...]
+  ingredients           JSONB       NOT NULL,
+  -- Mixing instructions (rich text)
+  instructions          TEXT,
+  -- Expected outcome
+  target_shade          TEXT,
+  notes                 TEXT,
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_chemical_recipes_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.chemical_recipes
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+ALTER TABLE {{BUSINESS}}.service_types
+  ADD CONSTRAINT fk_{{BUSINESS}}_service_types_recipe
+    FOREIGN KEY (default_recipe_id) REFERENCES {{BUSINESS}}.chemical_recipes (recipe_id) ON DELETE SET NULL;
+
+-- ── service_jobs ─────────────────────────────────────────
+-- THE digital Hair Assignment Register. One row per service-on-hair
+-- assignment. Links hair (variant or production_run_unit) ↔ stylist
+-- ↔ service_type ↔ status.
+CREATE TABLE {{BUSINESS}}.service_jobs (
+  job_id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_number            TEXT        NOT NULL UNIQUE,            -- 'FLH-JOB-0001'
+  -- What service
+  service_type_id       UUID        NOT NULL REFERENCES {{BUSINESS}}.service_types (service_type_id),
+  -- Who's doing it (a stylist from shared.stylist_partners OR an internal staff member)
+  assigned_stylist_id   UUID        REFERENCES shared.stylist_partners (stylist_id) ON DELETE SET NULL,
+  assigned_staff_user_id UUID       REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  -- The hair being worked on (multiple ways to identify)
+  hair_variant_id       UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  hair_unit_id          UUID        REFERENCES {{BUSINESS}}.production_run_units (unit_id) ON DELETE SET NULL,
+  hair_description      TEXT,                                   -- free-text when not a tracked unit
+  -- For whom (customer order, walk-in styling, internal restyle)
+  sales_order_id        UUID        REFERENCES {{BUSINESS}}.sales_orders (order_id) ON DELETE SET NULL,
+  sales_order_line_id   UUID        REFERENCES {{BUSINESS}}.sales_order_lines (line_id) ON DELETE SET NULL,
+  customer_contact_id   UUID        REFERENCES shared.contacts (contact_id) ON DELETE SET NULL,
+  -- For intercompany Flow-1 (PXG hair styled by FLH)
+  intercompany_transaction_id UUID  REFERENCES shared.intercompany_transactions (ic_transaction_id) ON DELETE SET NULL,
+  is_intercompany       BOOLEAN     NOT NULL DEFAULT false,
+  -- Job specification (custom requirements)
+  specification         JSONB,                                  -- color target, install style, etc.
+  recipe_id             UUID        REFERENCES {{BUSINESS}}.chemical_recipes (recipe_id) ON DELETE SET NULL,
+  recipe_override       JSONB,                                  -- if stylist deviated from default
+  -- ── STATUS (V2.2: Pending → In Progress → Completed)
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','in_progress','on_hold','completed','rejected','cancelled')),
+  -- Lifecycle dates
+  scheduled_for         TIMESTAMPTZ,
+  expected_completion_at TIMESTAMPTZ,
+  started_at            TIMESTAMPTZ,
+  completed_at          TIMESTAMPTZ,
+  cancelled_at          TIMESTAMPTZ,
+  cancellation_reason   TEXT,
+  -- Cost capture
+  agreed_cost_ngn       NUMERIC(14,2),                          -- snapshot of service_type.standard_cost_ngn or override
+  actual_cost_ngn       NUMERIC(14,2),                          -- what was billed
+  -- Quality
+  quality_rating        SMALLINT    CHECK (quality_rating BETWEEN 1 AND 5),
+  quality_notes         TEXT,
+  customer_rating       SMALLINT    CHECK (customer_rating BETWEEN 1 AND 5),
+  customer_feedback     TEXT,
+  -- Photos
+  before_photo_doc_ids  UUID[]      NOT NULL DEFAULT '{}',
+  after_photo_doc_ids   UUID[]      NOT NULL DEFAULT '{}',
+  -- Linked task (per V2.2: assigning a job also raises a task for the stylist)
+  task_id               UUID        REFERENCES shared.tasks (task_id) ON DELETE SET NULL,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_service_jobs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.service_jobs
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_status
+  ON {{BUSINESS}}.service_jobs (status, expected_completion_at);
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_stylist
+  ON {{BUSINESS}}.service_jobs (assigned_stylist_id, status)
+  WHERE assigned_stylist_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_staff
+  ON {{BUSINESS}}.service_jobs (assigned_staff_user_id, status)
+  WHERE assigned_staff_user_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_unit
+  ON {{BUSINESS}}.service_jobs (hair_unit_id) WHERE hair_unit_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_order
+  ON {{BUSINESS}}.service_jobs (sales_order_id) WHERE sales_order_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_ic
+  ON {{BUSINESS}}.service_jobs (intercompany_transaction_id) WHERE intercompany_transaction_id IS NOT NULL;
+-- Anti-pocketing index: completed jobs with no linked sale (V2.2 §6.30)
+CREATE INDEX idx_{{BUSINESS}}_service_jobs_pocketing_risk
+  ON {{BUSINESS}}.service_jobs (completed_at DESC)
+  WHERE status = 'completed'
+    AND sales_order_id IS NULL
+    AND intercompany_transaction_id IS NULL;
+
+-- Wire deferred FKs
+ALTER TABLE {{BUSINESS}}.production_run_units
+  ADD CONSTRAINT fk_{{BUSINESS}}_production_run_units_service_job
+    FOREIGN KEY (service_job_id) REFERENCES {{BUSINESS}}.service_jobs (job_id) ON DELETE SET NULL;
+ALTER TABLE {{BUSINESS}}.sales_order_lines
+  ADD CONSTRAINT fk_{{BUSINESS}}_sales_order_lines_service_job
+    FOREIGN KEY (service_job_id) REFERENCES {{BUSINESS}}.service_jobs (job_id) ON DELETE SET NULL;
+
+-- ── service_job_chemicals ────────────────────────────────
+-- Per-job chemical consumption (for Colour Creation and any other
+-- service that uses chemicals). Feeds monthly_chemical_reconciliations.
+CREATE TABLE {{BUSINESS}}.service_job_chemicals (
+  consumption_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id                UUID        NOT NULL REFERENCES {{BUSINESS}}.service_jobs (job_id) ON DELETE CASCADE,
+  chemical_name         TEXT        NOT NULL,
+  chemical_brand        TEXT,
+  -- Variant linkage if the chemical is also a tracked product
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE SET NULL,
+  qty_used              NUMERIC(10,3) NOT NULL CHECK (qty_used > 0),
+  unit                  TEXT        NOT NULL,                  -- 'ml','g','units'
+  cost_ngn              NUMERIC(14,2),                          -- allocated cost
+  notes                 TEXT,
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_service_job_chemicals_job
+  ON {{BUSINESS}}.service_job_chemicals (job_id);
+CREATE INDEX idx_{{BUSINESS}}_service_job_chemicals_chemical
+  ON {{BUSINESS}}.service_job_chemicals (chemical_name);
+
+-- ── monthly_chemical_reconciliations ─────────────────────
+-- Month-end check: chemical bought (purchasing) vs chemical consumed
+-- (service_job_chemicals). Variance flagged as anti-pocketing signal.
+CREATE TABLE {{BUSINESS}}.monthly_chemical_reconciliations (
+  reconciliation_id     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  fiscal_period_id      UUID        NOT NULL REFERENCES {{BUSINESS}}.fiscal_periods (period_id),
+  chemical_name         TEXT        NOT NULL,
+  unit                  TEXT        NOT NULL,
+  qty_purchased         NUMERIC(12,3) NOT NULL DEFAULT 0,
+  qty_consumed          NUMERIC(12,3) NOT NULL DEFAULT 0,
+  qty_disposed          NUMERIC(12,3) NOT NULL DEFAULT 0,
+  qty_variance          NUMERIC(12,3) GENERATED ALWAYS AS (qty_purchased - qty_consumed - qty_disposed) STORED,
+  variance_value_ngn    NUMERIC(14,2),
+  variance_status       TEXT        DEFAULT 'normal'
+                        CHECK (variance_status IN ('normal','flagged','investigated','resolved')),
+  investigation_notes   TEXT,
+  computed_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (fiscal_period_id, chemical_name, unit)
+);
+CREATE INDEX idx_{{BUSINESS}}_chem_recon_flagged
+  ON {{BUSINESS}}.monthly_chemical_reconciliations (computed_at DESC)
+  WHERE variance_status = 'flagged';
+
+-- ============================================================
+-- After 000016..024+025: 94 + 11 = 105 tables
+-- ============================================================

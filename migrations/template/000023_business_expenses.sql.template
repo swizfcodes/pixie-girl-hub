@@ -1,0 +1,252 @@
+-- ============================================================
+-- TEMPLATE 000023 — Per-business expense management
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.7 — Expenses.
+--
+-- Two flows:
+--   1. Reimbursement: staff pays first, submits receipt, gets paid back
+--   2. Cash Advance: staff requests money, spends, returns receipt + change
+--
+-- Three statuses staff see on their dashboard: Pending, Approved, Paid.
+-- Approved expenses flow into Accounting (journal_entries).
+-- Approval routing via shared.workflow_definitions.
+--
+-- Tables:
+--   expense_categories         — per-brand expense categorisation
+--   cash_advances              — money issued before spending
+--   cash_advance_settlements   — when staff returns receipts + change
+--   expenses                   — header (reimbursement or advance-settled)
+--   expense_lines              — line items with category + tax + GL hint
+--   expense_receipts           — supporting docs
+--   expense_approvals          — approval audit (workflow_instances proxy)
+-- ============================================================
+
+-- ── expense_categories ───────────────────────────────────
+-- Per-brand category list. Each links to a default expense GL
+-- account for auto-posting. Examples: "Office Supplies",
+-- "Travel — Local", "Travel — International", "Marketing — Ads",
+-- "Marketing — Influencer", "Stylist Fees", "Bank Charges",
+-- "Customs/Duty", "3PL — Lagos", "Petty Cash".
+CREATE TABLE {{BUSINESS}}.expense_categories (
+  category_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  category_key          TEXT        NOT NULL UNIQUE,
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Default GL account (set when admin configures the COA)
+  default_account_id    UUID        REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE SET NULL,
+  -- Default tax treatment
+  default_vat_rate      NUMERIC(5,4),
+  default_wht_rate      NUMERIC(5,4),
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  -- Approval workflow override (else uses workflow_definitions default)
+  workflow_key_override TEXT,
+  -- Auto-flag suspicious patterns
+  unusual_amount_threshold_ngn NUMERIC(12,2),
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_expense_categories_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.expense_categories
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── cash_advances ────────────────────────────────────────
+-- Staff requests money before spending. Once approved + paid out,
+-- the staff member is expected to return with receipts + change.
+CREATE TABLE {{BUSINESS}}.cash_advances (
+  advance_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  advance_number        TEXT        NOT NULL UNIQUE,            -- 'PXG-ADV-0001'
+  requested_by          UUID        NOT NULL REFERENCES shared.users (user_id),
+  purpose               TEXT        NOT NULL,
+  -- Anticipated category (final categorisation happens on settlement)
+  category_id           UUID        REFERENCES {{BUSINESS}}.expense_categories (category_id) ON DELETE SET NULL,
+  -- Amounts
+  requested_amount_ngn  NUMERIC(14,2) NOT NULL CHECK (requested_amount_ngn > 0),
+  approved_amount_ngn   NUMERIC(14,2),
+  -- For trips / out-of-country: original currency
+  requested_currency    TEXT        REFERENCES shared.currencies (currency_code),
+  requested_amount_currency NUMERIC(14,2),
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','approved','disbursed','settled','rejected','cancelled','overdue_settlement')),
+  -- Approval
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  rejected_at           TIMESTAMPTZ,
+  rejection_reason      TEXT,
+  -- Disbursement
+  disbursed_by          UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  disbursed_at          TIMESTAMPTZ,
+  disbursement_method   TEXT        CHECK (disbursement_method IN ('cash','bank_transfer','pos_card','wallet',NULL)),
+  disbursement_reference TEXT,
+  -- Settlement expectation
+  settle_by             DATE,
+  -- Posted journal entry (advance becomes an AR-like asset until settled)
+  disbursement_journal_id UUID      REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_cash_advances_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.cash_advances
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_cash_advances_requestor
+  ON {{BUSINESS}}.cash_advances (requested_by, status, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_cash_advances_status
+  ON {{BUSINESS}}.cash_advances (status, created_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_cash_advances_overdue
+  ON {{BUSINESS}}.cash_advances (settle_by)
+  WHERE status = 'disbursed';
+
+-- ── cash_advance_settlements ─────────────────────────────
+-- One row per settlement event. Each settles part or all of an
+-- advance against actual expenses + change returned.
+CREATE TABLE {{BUSINESS}}.cash_advance_settlements (
+  settlement_id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  advance_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.cash_advances (advance_id),
+  expense_id            UUID,                                    -- FK wired below after expenses
+  -- Amounts
+  amount_settled_ngn    NUMERIC(14,2) NOT NULL CHECK (amount_settled_ngn > 0),
+  change_returned_ngn   NUMERIC(14,2) NOT NULL DEFAULT 0,
+  shortfall_ngn         NUMERIC(14,2) NOT NULL DEFAULT 0,        -- staff overspent; needs reimbursement
+  -- Audit
+  recorded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  notes                 TEXT
+);
+CREATE INDEX idx_{{BUSINESS}}_cash_advance_settlements_advance
+  ON {{BUSINESS}}.cash_advance_settlements (advance_id);
+
+-- ── expenses ─────────────────────────────────────────────
+-- The expense report. May be a reimbursement (no advance_id) or
+-- the settlement of a cash advance (advance_id set).
+CREATE TABLE {{BUSINESS}}.expenses (
+  expense_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  expense_number        TEXT        NOT NULL UNIQUE,            -- 'PXG-EXP-0001'
+  expense_type          TEXT        NOT NULL
+                        CHECK (expense_type IN ('reimbursement','advance_settlement','company_card','direct_invoice')),
+  -- Submitter
+  submitted_by          UUID        NOT NULL REFERENCES shared.users (user_id),
+  -- For advance settlements
+  advance_id            UUID        REFERENCES {{BUSINESS}}.cash_advances (advance_id) ON DELETE SET NULL,
+  -- Header
+  title                 TEXT        NOT NULL,
+  expense_date          DATE        NOT NULL,
+  description           TEXT,
+  -- Totals (sum of lines)
+  total_amount_ngn      NUMERIC(14,2) NOT NULL DEFAULT 0,
+  vat_amount_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Currency of original receipt (e.g. AED for travel) + NGN equivalent
+  original_currency     TEXT        REFERENCES shared.currencies (currency_code),
+  original_amount       NUMERIC(14,2),
+  fx_rate_used          NUMERIC(15,6),
+  -- Lifecycle (per V2.2: Pending, Approved, Paid)
+  status                TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('draft','pending','approved','rejected','paid','reimbursed','partially_paid','cancelled')),
+  -- Approval
+  workflow_instance_id  UUID        REFERENCES shared.workflow_instances (instance_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  rejected_at           TIMESTAMPTZ,
+  rejection_reason      TEXT,
+  -- Payment
+  paid_at               TIMESTAMPTZ,
+  paid_by               UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  payment_method        TEXT        CHECK (payment_method IN ('cash','bank_transfer','pos_card','payslip_addition','wallet',NULL)),
+  payment_reference     TEXT,
+  -- Journal posting
+  journal_entry_id      UUID        REFERENCES {{BUSINESS}}.journal_entries (entry_id) ON DELETE SET NULL,
+  -- Audit
+  notes                 TEXT,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_expenses_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.expenses
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_expenses_submitter
+  ON {{BUSINESS}}.expenses (submitted_by, status, expense_date DESC);
+CREATE INDEX idx_{{BUSINESS}}_expenses_status
+  ON {{BUSINESS}}.expenses (status, expense_date DESC);
+CREATE INDEX idx_{{BUSINESS}}_expenses_advance
+  ON {{BUSINESS}}.expenses (advance_id) WHERE advance_id IS NOT NULL;
+
+-- Wire deferred FK
+ALTER TABLE {{BUSINESS}}.cash_advance_settlements
+  ADD CONSTRAINT fk_{{BUSINESS}}_cash_advance_settlements_expense
+    FOREIGN KEY (expense_id) REFERENCES {{BUSINESS}}.expenses (expense_id) ON DELETE SET NULL;
+
+-- ── expense_lines ────────────────────────────────────────
+CREATE TABLE {{BUSINESS}}.expense_lines (
+  line_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  expense_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.expenses (expense_id) ON DELETE CASCADE,
+  category_id           UUID        NOT NULL REFERENCES {{BUSINESS}}.expense_categories (category_id),
+  description           TEXT        NOT NULL,
+  -- Amounts (NGN canonical + original-currency display)
+  amount_ngn            NUMERIC(14,2) NOT NULL CHECK (amount_ngn > 0),
+  vat_amount_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  wht_amount_ngn        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  original_currency     TEXT        REFERENCES shared.currencies (currency_code),
+  original_amount       NUMERIC(14,2),
+  -- Vendor (free-text — most expenses are at one-off vendors not in supplier table)
+  vendor_name           TEXT,
+  vendor_tin            TEXT,
+  -- Receipt (one or many; expense_receipts holds the actual files)
+  receipt_date          DATE,
+  -- GL hint (overrides category default)
+  account_id            UUID        REFERENCES {{BUSINESS}}.chart_of_accounts (account_id) ON DELETE SET NULL,
+  -- Project / cost-centre tagging
+  project               TEXT,
+  cost_centre           TEXT,
+  display_order         SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_{{BUSINESS}}_expense_lines_expense
+  ON {{BUSINESS}}.expense_lines (expense_id);
+CREATE INDEX idx_{{BUSINESS}}_expense_lines_category
+  ON {{BUSINESS}}.expense_lines (category_id);
+
+-- ── expense_receipts ─────────────────────────────────────
+-- One or many receipts (PDFs / images) per expense or per line.
+-- The actual file lives in shared.documents.
+CREATE TABLE {{BUSINESS}}.expense_receipts (
+  receipt_id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  expense_id            UUID        REFERENCES {{BUSINESS}}.expenses (expense_id) ON DELETE CASCADE,
+  expense_line_id       UUID        REFERENCES {{BUSINESS}}.expense_lines (line_id) ON DELETE CASCADE,
+  document_id           UUID        NOT NULL REFERENCES shared.documents (document_id),
+  amount_on_receipt_ngn NUMERIC(14,2),
+  receipt_date          DATE,
+  vendor_name           TEXT,
+  -- Optional OCR extraction blob (when receipts are scanned via mobile)
+  ocr_data              JSONB,
+  uploaded_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  uploaded_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT receipt_has_target CHECK (expense_id IS NOT NULL OR expense_line_id IS NOT NULL)
+);
+CREATE INDEX idx_{{BUSINESS}}_expense_receipts_expense
+  ON {{BUSINESS}}.expense_receipts (expense_id) WHERE expense_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_expense_receipts_line
+  ON {{BUSINESS}}.expense_receipts (expense_line_id) WHERE expense_line_id IS NOT NULL;
+
+-- ── expense_approvals ────────────────────────────────────
+-- Per-approver decision audit. The workflow_instance covers the
+-- chain; this table is the human-readable history surfaced on the
+-- expense detail page.
+CREATE TABLE {{BUSINESS}}.expense_approvals (
+  approval_id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  expense_id            UUID        NOT NULL REFERENCES {{BUSINESS}}.expenses (expense_id) ON DELETE CASCADE,
+  stage_number          SMALLINT    NOT NULL,
+  approver_user_id      UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  decision              TEXT        NOT NULL CHECK (decision IN ('approve','reject','request_info','escalate')),
+  amount_approved_ngn   NUMERIC(14,2),                          -- may differ from claimed if partial
+  comments              TEXT,
+  decided_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_expense_approvals_expense
+  ON {{BUSINESS}}.expense_approvals (expense_id, stage_number);
+
+-- ============================================================
+-- After 000016..022+023: 73 + 7 = 80 tables
+-- ============================================================

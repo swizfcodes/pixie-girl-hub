@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: pixie_hub_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Migrate schema
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: pixie_hub_test
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+        run: |
+          npm run db:migrate:shared
+          npm run db:bootstrap:pixiegirl
+          npm run db:bootstrap:faitlynhair
+          npm run db:verify
+
+      - name: Test
+        env:
+          NODE_ENV: test
+          DB_HOST: localhost
+          DB_NAME: pixie_hub_test
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          REDIS_HOST: localhost
+          JWT_SECRET: ci_secret_at_least_thirty_two_characters_long
+          SESSION_SECRET: another_ci_secret_at_least_thirty_two
+          ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: npm test

@@ -1,0 +1,256 @@
+-- ============================================================
+-- TEMPLATE 000031 — Per-business retention extras
+-- Pixie Girl Hub · JBS Praxis · V2.0
+--
+-- Module 6.23 — Retention.
+--
+-- Brand-specific retention machinery: bundle offers (e.g. "Buy 2
+-- get 1 free" / "Wig + maintenance kit"), maintenance subscriptions
+-- (Faitlyn salon visits), automated workflow rules that fire on
+-- triggers (post-purchase thank-you, reorder reminders, win-back).
+--
+-- Shared.subscriptions handles WIG subscriptions; this template
+-- handles brand-specific bundle + maintenance + workflow logic.
+--
+-- Tables:
+--   bundle_offers                  — promotional bundles
+--   bundle_offer_products          — products in the bundle
+--   maintenance_plans              — Faitlyn maintenance subscription plans
+--   maintenance_subscriptions      — customer subscriptions to maintenance plans
+--   retention_workflow_rules       — automated retention triggers
+--   retention_workflow_executions  — per-customer execution log
+-- ============================================================
+
+-- ── bundle_offers ────────────────────────────────────────
+-- Curated bundles. "Wig + maintenance kit at 15% off"; "Buy 2
+-- wigs, get the 3rd at 30% off". Different from coupons in that
+-- bundles are explicit product groupings with their own price.
+CREATE TABLE {{BUSINESS}}.bundle_offers (
+  bundle_id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  bundle_code           TEXT        NOT NULL UNIQUE,            -- 'WIG-CARE-KIT-2026'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Pricing model
+  pricing_model         TEXT        NOT NULL
+                        CHECK (pricing_model IN ('fixed_bundle_price','pct_off','amount_off','buy_x_get_y','tiered_qty')),
+  -- For 'fixed_bundle_price'
+  bundle_price_ngn      NUMERIC(14,2),
+  -- For 'pct_off' or 'amount_off'
+  discount_value        NUMERIC(14,4),
+  -- For 'buy_x_get_y'
+  buy_quantity          SMALLINT,
+  get_quantity          SMALLINT,
+  get_discount_pct      NUMERIC(5,2),
+  -- For 'tiered_qty' — [{"qty": 2, "discount": 10}, {"qty": 3, "discount": 20}]
+  qty_tiers             JSONB,
+  -- Validity
+  valid_from            DATE        NOT NULL DEFAULT CURRENT_DATE,
+  valid_to              DATE,
+  -- Stock-link: a bundle requires all components to be in stock
+  requires_all_components_in_stock BOOLEAN NOT NULL DEFAULT true,
+  -- Usage
+  total_usage_limit     INTEGER,
+  total_used            INTEGER     NOT NULL DEFAULT 0,
+  per_customer_limit    INTEGER,
+  -- Storefront visibility
+  is_visible_storefront BOOLEAN     NOT NULL DEFAULT true,
+  hero_image_url        TEXT,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  -- Audit
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_by           UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  approved_at           TIMESTAMPTZ,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_bundle_offers_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.bundle_offers
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_bundle_offers_active
+  ON {{BUSINESS}}.bundle_offers (valid_from, valid_to)
+  WHERE is_active = true AND is_visible_storefront = true;
+
+-- ── bundle_offer_products ────────────────────────────────
+-- Products in a bundle. Required vs optional, quantity per bundle.
+CREATE TABLE {{BUSINESS}}.bundle_offer_products (
+  bundle_product_id     UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  bundle_id             UUID        NOT NULL REFERENCES {{BUSINESS}}.bundle_offers (bundle_id) ON DELETE CASCADE,
+  -- Either a specific variant or any variant in a product
+  product_id            UUID        REFERENCES {{BUSINESS}}.products (product_id) ON DELETE CASCADE,
+  variant_id            UUID        REFERENCES {{BUSINESS}}.product_variants (variant_id) ON DELETE CASCADE,
+  -- Quantity needed of this component
+  quantity              INTEGER     NOT NULL DEFAULT 1 CHECK (quantity > 0),
+  -- Role: 'core' = must be in cart; 'free' = added free; 'discounted' = discounted
+  role                  TEXT        NOT NULL DEFAULT 'core'
+                        CHECK (role IN ('core','free','discounted','optional')),
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  CONSTRAINT bundle_product_has_target CHECK (product_id IS NOT NULL OR variant_id IS NOT NULL)
+);
+CREATE INDEX idx_{{BUSINESS}}_bundle_products_bundle
+  ON {{BUSINESS}}.bundle_offer_products (bundle_id);
+CREATE INDEX idx_{{BUSINESS}}_bundle_products_product
+  ON {{BUSINESS}}.bundle_offer_products (product_id) WHERE product_id IS NOT NULL;
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ MAINTENANCE PLANS (Faitlyn salon subscription)                     ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── maintenance_plans ────────────────────────────────────
+-- Plan definitions (e.g. "Monthly Maintenance — 1 visit", "Premium
+-- — 3 visits + 1 colour touch-up"). Brand-specific (Faitlyn).
+CREATE TABLE {{BUSINESS}}.maintenance_plans (
+  plan_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  plan_key              TEXT        NOT NULL UNIQUE,            -- 'basic_monthly','premium_quarterly'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Billing
+  billing_cycle         TEXT        NOT NULL CHECK (billing_cycle IN ('monthly','quarterly','semi_annual','annual')),
+  price_ngn             NUMERIC(14,2) NOT NULL CHECK (price_ngn > 0),
+  -- Included services per cycle
+  -- [{"service_key":"revamping","quantity":1},{"service_key":"customization","quantity":2}]
+  included_services     JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  -- Discounts on additional services beyond included
+  extra_service_discount_pct NUMERIC(5,2),
+  -- Subscriber-only benefits
+  benefits              JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Display
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  display_order         SMALLINT    NOT NULL DEFAULT 0,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_maintenance_plans_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.maintenance_plans
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+
+-- ── maintenance_subscriptions ────────────────────────────
+-- A customer's subscription to a maintenance plan. Tracks visit
+-- count, billing, and pause state.
+CREATE TABLE {{BUSINESS}}.maintenance_subscriptions (
+  subscription_id       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  subscription_number   TEXT        NOT NULL UNIQUE,            -- 'PXG-MNT-0001'
+  contact_id            UUID        NOT NULL REFERENCES shared.contacts (contact_id),
+  plan_id               UUID        NOT NULL REFERENCES {{BUSINESS}}.maintenance_plans (plan_id),
+  -- Lifecycle
+  status                TEXT        NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','paused','cancelled','expired','past_due')),
+  started_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  current_cycle_starts_at TIMESTAMPTZ,
+  current_cycle_ends_at TIMESTAMPTZ,
+  next_billing_at       TIMESTAMPTZ,
+  paused_at             TIMESTAMPTZ,
+  resumed_at            TIMESTAMPTZ,
+  cancelled_at          TIMESTAMPTZ,
+  cancellation_reason   TEXT,
+  -- Visit counters (current cycle)
+  visits_used_current_cycle SMALLINT NOT NULL DEFAULT 0,
+  visits_allowed_current_cycle SMALLINT NOT NULL DEFAULT 0,
+  -- Lifetime counters
+  total_visits          INTEGER     NOT NULL DEFAULT 0,
+  total_billed_ngn      NUMERIC(14,2) NOT NULL DEFAULT 0,
+  -- Auto-billing
+  paystack_authorization_code TEXT,
+  failed_attempts_in_row SMALLINT   NOT NULL DEFAULT 0,
+  -- Audit
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_maintenance_subs_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.maintenance_subscriptions
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_maintenance_subs_contact
+  ON {{BUSINESS}}.maintenance_subscriptions (contact_id, status);
+CREATE INDEX idx_{{BUSINESS}}_maintenance_subs_due
+  ON {{BUSINESS}}.maintenance_subscriptions (next_billing_at)
+  WHERE status = 'active';
+
+-- ╔════════════════════════════════════════════════════════════════════╗
+-- ║ AUTOMATED RETENTION WORKFLOWS                                      ║
+-- ╚════════════════════════════════════════════════════════════════════╝
+
+-- ── retention_workflow_rules ─────────────────────────────
+-- Trigger-action rules: "On purchase complete → send thank-you SMS";
+-- "After 45 days of inactivity → enter win-back flow"; "On tier
+-- upgrade → send celebration email".
+CREATE TABLE {{BUSINESS}}.retention_workflow_rules (
+  rule_id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_key              TEXT        NOT NULL UNIQUE,            -- 'post_purchase_thank_you'
+  display_name          TEXT        NOT NULL,
+  description           TEXT,
+  -- Trigger (Amendment-6: aligned with V2 §6.23 spec — all 8 automation types covered)
+  trigger_type          TEXT        NOT NULL
+                        CHECK (trigger_type IN ('order_placed','order_delivered','order_cancelled',
+                                                'review_left','first_purchase','tier_upgrade','tier_downgrade',
+                                                'birthday','anniversary','referral_completed','points_milestone',
+                                                'cart_abandoned','abandoned_cart','inactivity','high_value_purchase',
+                                                'subscription_renewal','subscription_renewal_reminder',
+                                                'reorder_reminder','win_back','custom_event')),
+  -- Trigger conditions (extends the type)
+  trigger_conditions    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  -- Wait period between trigger and action
+  wait_minutes          INTEGER     NOT NULL DEFAULT 0,
+  -- Action
+  action_type           TEXT        NOT NULL
+                        CHECK (action_type IN ('send_email','send_whatsapp','send_sms','award_points',
+                                               'issue_coupon','create_task','assign_to_user','add_to_segment',
+                                               'notify_team','custom')),
+  -- Action config
+  action_config         JSONB       NOT NULL,
+  -- Email/WhatsApp action: reference to template_id
+  email_template_id     UUID        REFERENCES {{BUSINESS}}.email_templates (template_id) ON DELETE SET NULL,
+  -- Coupon issuance: shared.coupons template
+  coupon_template       JSONB,
+  -- Audience filtering
+  segment_id            UUID        REFERENCES shared.contact_segments (segment_id) ON DELETE SET NULL,
+  -- Per-customer rate-limit
+  max_executions_per_customer SMALLINT,
+  rate_limit_days       SMALLINT,
+  -- Lifecycle
+  is_active             BOOLEAN     NOT NULL DEFAULT true,
+  last_run_at           TIMESTAMPTZ,
+  total_executions      INTEGER     NOT NULL DEFAULT 0,
+  -- Audit
+  created_by            UUID        REFERENCES shared.users (user_id) ON DELETE SET NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TRIGGER trg_{{BUSINESS}}_retention_rules_updated_at
+  BEFORE UPDATE ON {{BUSINESS}}.retention_workflow_rules
+  FOR EACH ROW EXECUTE FUNCTION shared.fn_set_updated_at();
+CREATE INDEX idx_{{BUSINESS}}_retention_rules_trigger
+  ON {{BUSINESS}}.retention_workflow_rules (trigger_type) WHERE is_active = true;
+
+-- ── retention_workflow_executions ────────────────────────
+-- Append-only log of every rule execution.
+CREATE TABLE {{BUSINESS}}.retention_workflow_executions (
+  execution_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  rule_id               UUID        NOT NULL REFERENCES {{BUSINESS}}.retention_workflow_rules (rule_id) ON DELETE CASCADE,
+  contact_id            UUID        REFERENCES shared.contacts (contact_id) ON DELETE SET NULL,
+  -- Originating event
+  trigger_event_type    TEXT        NOT NULL,
+  trigger_source_table  TEXT,                                    -- 'sales_orders','loyalty_ledger', etc.
+  trigger_source_id     UUID,
+  -- Execution
+  status                TEXT        NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','executing','completed','failed','suppressed','cancelled')),
+  queued_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  executed_at           TIMESTAMPTZ,
+  failure_reason        TEXT,
+  -- Outcome
+  result_summary        JSONB,                                   -- e.g. {"email_sent":true,"coupon_issued":"WELCOME10"}
+  generated_records     JSONB,                                   -- linked IDs (coupon, task, etc.)
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_{{BUSINESS}}_retention_executions_rule
+  ON {{BUSINESS}}.retention_workflow_executions (rule_id, executed_at DESC);
+CREATE INDEX idx_{{BUSINESS}}_retention_executions_contact
+  ON {{BUSINESS}}.retention_workflow_executions (contact_id, executed_at DESC)
+  WHERE contact_id IS NOT NULL;
+CREATE INDEX idx_{{BUSINESS}}_retention_executions_pending
+  ON {{BUSINESS}}.retention_workflow_executions (queued_at)
+  WHERE status = 'queued';
+
+-- ============================================================
+-- After 000016..030+031: 146 + 6 = 152 tables
+-- ============================================================

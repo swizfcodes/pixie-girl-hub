@@ -1,0 +1,117 @@
+openapi: 3.1.0
+info:
+  title: Pixie Girl Hub API
+  version: 1.0.0
+  description: |
+    Backend API for the Pixie Girl Hub — multi-entity ERP/CRM/E-commerce platform.
+    See ARCHITECTURE.md and API_CONVENTIONS.md in the same folder.
+
+  contact:
+    name: JBS Praxis
+servers:
+  - url: https://api.pixiegirlhub.com/api/v1
+    description: Production
+  - url: http://localhost:3000/api/v1
+    description: Local dev
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    BrandContext:
+      name: X-Brand-Context
+      in: header
+      required: true
+      schema:
+        type: string
+        enum: [pixiegirl, faitlynhair]
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated but not permitted
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ValidationError:
+      description: Input validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationError"
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+        request_id:
+          type: string
+    ValidationError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [VALIDATION_ERROR]
+            message:
+              type: string
+            fields:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+        request_id:
+          type: string
+
+paths:
+  /auth/login:
+    post:
+      summary: Login with email + password
+      security: []
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Logged in
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # TODO: 200+ more endpoints across 37 modules
