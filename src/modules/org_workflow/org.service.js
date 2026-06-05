@@ -15,7 +15,7 @@ const repo = require("./org.repo");
 const events = require("./org.events");
 const { audit } = require("../../middleware/audit");
 const { transaction } = require("../../config/database");
-const { NotFoundError, AppError } = require("../../utils/errors");
+const { NotFoundError } = require("../../utils/errors");
 
 async function list({ brand, user, scope, filters, page, page_size }) {
   return repo.findAll({

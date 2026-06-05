@@ -533,7 +533,7 @@ CREATE TABLE {{BUSINESS}}.sales_campaigns (
   og_image_url          TEXT,
   -- ── STATE
   status                TEXT        NOT NULL DEFAULT 'draft'
-                        CHECK (status IN ('draft','scheduled','live','paused','ended','archived')),
+                        CHECK (status IN ('draft','pending_approval','scheduled','live','paused','ended','archived')),
   -- Usage cap (optional)
   total_usage_limit     INTEGER,
   total_usage_count     INTEGER     NOT NULL DEFAULT 0,

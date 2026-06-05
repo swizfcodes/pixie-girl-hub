@@ -2,14 +2,13 @@
  * Sales Campaigns & Landing Pages (V2.2 §6.22)
  * Repository — parameterised SQL only. No business logic, no HTTP.
  *
- * Conventions:
- *   - Every function takes a { client?, brand, ... } options object.
- *   - If `client` is provided, run within that transaction; else use the
- *     pool (via `query`).
- *   - All values bound with $1..$N placeholders. NEVER string-interpolate.
- *   - Schema names are switched by brand: pixiegirl.* or faitlynhair.*.
- *   - For shared tables (audit_log, contacts, etc.), use the `shared.` schema
- *     and filter by `business` column.
+ * Entity isolation: every function takes `brand`; table names are built
+ * from a validated whitelist (pixiegirl.* | faitlynhair.*). Never
+ * string-interpolate user input into SQL — only the validated brand.
+ *
+ * Backing tables (all per-brand):
+ *   sales_campaigns, sales_campaign_products,
+ *   sales_campaign_signups, sales_campaign_metrics
  */
 
 "use strict";
@@ -18,10 +17,51 @@ const { query } = require("../../config/database");
 
 const VALID_BRANDS = new Set(["pixiegirl", "faitlynhair"]);
 
-function tableFor(brand) {
+function t(brand, table) {
   if (!VALID_BRANDS.has(brand)) throw new Error(`Invalid brand: ${brand}`);
-  return `${brand}.sales_campaigns`;
+  return `${brand}.${table}`;
 }
+
+function exec(client) {
+  return client ? client.query.bind(client) : query;
+}
+
+// Columns a client may set on create, and how to bind them.
+const CREATE_COLS = [
+  "slug",
+  "name",
+  "description",
+  "starts_at",
+  "ends_at",
+  "discount_type",
+  "discount_value",
+  "min_order_value_ngn",
+  "customer_segment_id",
+  "first_time_buyers_only",
+  "product_scope",
+  "landing_hero_title",
+  "landing_hero_subtitle",
+  "landing_hero_image_url",
+  "landing_cta_text",
+  "landing_blocks",
+  "countdown_message",
+  "signup_for_notifications",
+  "ended_message",
+  "ended_redirect_to",
+  "meta_title",
+  "meta_description",
+  "og_image_url",
+  "total_usage_limit",
+];
+const UPDATE_COLS = CREATE_COLS; // same set is editable (status excluded by design)
+const JSONB_COLS = new Set(["landing_blocks"]);
+
+function bindValue(col, val) {
+  if (JSONB_COLS.has(col)) return JSON.stringify(val ?? []);
+  return val;
+}
+
+// ── Campaigns ────────────────────────────────────────────
 
 async function findAll({
   client,
@@ -31,45 +71,354 @@ async function findAll({
   filters = {},
   page = 1,
   page_size = 25,
+  offset = 0,
 }) {
-  // TODO: build dynamic WHERE based on filters + scope ('all' | 'team' | 'own')
-  const offset = (page - 1) * page_size;
-  const sql = `
-    SELECT *
-      FROM ${tableFor(brand)}
-     WHERE COALESCE(is_deleted, false) = false
-     ORDER BY created_at DESC
-     LIMIT $1 OFFSET $2
-  `;
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [page_size, offset]);
-  return { data: rows, page, page_size, total: rows.length }; // TODO: real count query
+  const where = [];
+  const params = [];
+  let i = 1;
+
+  if (filters.status) {
+    const statuses = Array.isArray(filters.status)
+      ? filters.status
+      : String(filters.status).split(",");
+    where.push(`status = ANY($${i++}::text[])`);
+    params.push(statuses);
+  } else {
+    where.push(`status <> 'archived'`);
+  }
+
+  if (filters.q) {
+    where.push(`(name ILIKE $${i} OR slug ILIKE $${i})`);
+    params.push(`%${filters.q}%`);
+    i++;
+  }
+
+  if (filters.active_on) {
+    where.push(`starts_at <= $${i} AND ends_at >= $${i}`);
+    params.push(filters.active_on);
+    i++;
+  }
+
+  if (scope === "own" && user_id) {
+    where.push(`created_by = $${i++}`);
+    params.push(user_id);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const run = exec(client);
+
+  const { rows: countRows } = await run(
+    `SELECT COUNT(*)::int AS total FROM ${t(brand, "sales_campaigns")} ${whereSql}`,
+    params,
+  );
+  const total = countRows[0].total;
+
+  const { rows } = await run(
+    `SELECT * FROM ${t(brand, "sales_campaigns")} ${whereSql}
+      ORDER BY created_at DESC
+      LIMIT $${i++} OFFSET $${i++}`,
+    [...params, page_size, offset],
+  );
+
+  return {
+    data: rows,
+    meta: { page, page_size, total, has_more: offset + rows.length < total },
+  };
 }
 
 async function findById({ client, brand, id }) {
-  const sql = `SELECT * FROM ${tableFor(brand)} WHERE sales_campaigns_id = $1 LIMIT 1`;
-  // NOTE: replace `sales_campaigns_id` with the actual PK name for this table
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [id]);
+  const { rows } = await exec(client)(
+    `SELECT * FROM ${t(brand, "sales_campaigns")} WHERE campaign_id = $1 LIMIT 1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+
+async function findBySlug({ client, brand, slug }) {
+  const { rows } = await exec(client)(
+    `SELECT * FROM ${t(brand, "sales_campaigns")} WHERE slug = $1 LIMIT 1`,
+    [slug],
+  );
   return rows[0] || null;
 }
 
 async function create({ client, brand, input, user_id }) {
-  // TODO: build INSERT with parameterised columns from `input`
-  throw new Error("TODO: implement sales_campaigns.create");
+  const cols = [];
+  const placeholders = [];
+  const params = [];
+  let i = 1;
+
+  for (const col of CREATE_COLS) {
+    if (input[col] === undefined) continue;
+    cols.push(col);
+    placeholders.push(JSONB_COLS.has(col) ? `$${i}::jsonb` : `$${i}`);
+    params.push(bindValue(col, input[col]));
+    i++;
+  }
+  cols.push("created_by");
+  placeholders.push(`$${i++}`);
+  params.push(user_id);
+
+  const { rows } = await exec(client)(
+    `INSERT INTO ${t(brand, "sales_campaigns")} (${cols.join(", ")})
+     VALUES (${placeholders.join(", ")})
+     RETURNING *`,
+    params,
+  );
+  return rows[0];
 }
 
 async function update({ client, brand, id, patch }) {
-  // TODO: build UPDATE with parameterised columns from `patch`
-  throw new Error("TODO: implement sales_campaigns.update");
+  const sets = [];
+  const params = [];
+  let i = 1;
+  for (const col of UPDATE_COLS) {
+    if (patch[col] === undefined) continue;
+    sets.push(JSONB_COLS.has(col) ? `${col} = $${i}::jsonb` : `${col} = $${i}`);
+    params.push(bindValue(col, patch[col]));
+    i++;
+  }
+  if (sets.length === 0) return findById({ client, brand, id });
+  params.push(id);
+  const { rows } = await exec(client)(
+    `UPDATE ${t(brand, "sales_campaigns")} SET ${sets.join(", ")}
+      WHERE campaign_id = $${i}
+      RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
 }
 
-async function archive({ client, brand, id }) {
-  const sql = `UPDATE ${tableFor(brand)}
-                  SET is_deleted = true, deleted_at = now()
-                WHERE sales_campaigns_id = $1`;
-  const exec = client ? client.query.bind(client) : query;
-  await exec(sql, [id]);
+/**
+ * Transition status. `extra` may carry approved_by (sets approved_at=now).
+ */
+async function setStatus({ client, brand, id, status, approved_by }) {
+  const sets = ["status = $1"];
+  const params = [status];
+  let i = 2;
+  if (approved_by) {
+    sets.push(`approved_by = $${i++}`, `approved_at = now()`);
+    params.push(approved_by);
+  }
+  params.push(id);
+  const { rows } = await exec(client)(
+    `UPDATE ${t(brand, "sales_campaigns")} SET ${sets.join(", ")}
+      WHERE campaign_id = $${i}
+      RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
 }
 
-module.exports = { findAll, findById, create, update, archive };
+/** Atomically bump denormalised counters (e.g. { total_signups: 1 }). */
+async function incrementCounters({ client, brand, id, deltas }) {
+  const sets = [];
+  const params = [];
+  let i = 1;
+  for (const [col, delta] of Object.entries(deltas)) {
+    sets.push(`${col} = ${col} + $${i++}`);
+    params.push(delta);
+  }
+  if (!sets.length) return;
+  params.push(id);
+  await exec(client)(
+    `UPDATE ${t(brand, "sales_campaigns")} SET ${sets.join(", ")} WHERE campaign_id = $${i}`,
+    params,
+  );
+}
+
+// ── Campaign products (include / exclude) ────────────────
+
+async function listProducts({ client, brand, campaign_id }) {
+  const { rows } = await exec(client)(
+    `SELECT scp.*, p.name AS product_name, pc.name AS category_name
+       FROM ${t(brand, "sales_campaign_products")} scp
+       LEFT JOIN ${t(brand, "products")} p ON p.product_id = scp.product_id
+       LEFT JOIN ${t(brand, "product_categories")} pc ON pc.category_id = scp.category_id
+      WHERE scp.campaign_id = $1
+      ORDER BY scp.display_order ASC, scp.is_featured DESC`,
+    [campaign_id],
+  );
+  return rows;
+}
+
+async function addProduct({ client, brand, campaign_id, input }) {
+  const { rows } = await exec(client)(
+    `INSERT INTO ${t(brand, "sales_campaign_products")}
+       (campaign_id, product_id, category_id, include_exclude,
+        campaign_price_ngn, display_order, is_featured)
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6,0), COALESCE($7,false))
+     RETURNING *`,
+    [
+      campaign_id,
+      input.product_id || null,
+      input.category_id || null,
+      input.include_exclude,
+      input.campaign_price_ngn ?? null,
+      input.display_order ?? null,
+      input.is_featured ?? null,
+    ],
+  );
+  return rows[0];
+}
+
+async function findProductLink({ client, brand, campaign_id, link_id }) {
+  const { rows } = await exec(client)(
+    `SELECT * FROM ${t(brand, "sales_campaign_products")}
+      WHERE link_id = $1 AND campaign_id = $2 LIMIT 1`,
+    [link_id, campaign_id],
+  );
+  return rows[0] || null;
+}
+
+async function updateProduct({ client, brand, campaign_id, link_id, patch }) {
+  const allowed = [
+    "campaign_price_ngn",
+    "display_order",
+    "is_featured",
+    "include_exclude",
+  ];
+  const sets = [];
+  const params = [];
+  let i = 1;
+  for (const col of allowed) {
+    if (patch[col] === undefined) continue;
+    sets.push(`${col} = $${i++}`);
+    params.push(patch[col]);
+  }
+  if (!sets.length) return findProductLink({ client, brand, campaign_id, link_id });
+  params.push(link_id, campaign_id);
+  const { rows } = await exec(client)(
+    `UPDATE ${t(brand, "sales_campaign_products")} SET ${sets.join(", ")}
+      WHERE link_id = $${i++} AND campaign_id = $${i}
+      RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+}
+
+async function removeProduct({ client, brand, campaign_id, link_id }) {
+  const { rowCount } = await exec(client)(
+    `DELETE FROM ${t(brand, "sales_campaign_products")}
+      WHERE link_id = $1 AND campaign_id = $2`,
+    [link_id, campaign_id],
+  );
+  return rowCount > 0;
+}
+
+// ── Signups (pre-launch notification list) ───────────────
+
+async function findSignup({ client, brand, campaign_id, email, phone }) {
+  const { rows } = await exec(client)(
+    `SELECT * FROM ${t(brand, "sales_campaign_signups")}
+      WHERE campaign_id = $1
+        AND ( ($2::citext IS NOT NULL AND email = $2)
+           OR ($3::text  IS NOT NULL AND phone = $3) )
+      LIMIT 1`,
+    [campaign_id, email || null, phone || null],
+  );
+  return rows[0] || null;
+}
+
+async function createSignup({ client, brand, campaign_id, input, contact_id, ip, user_agent }) {
+  const { rows } = await exec(client)(
+    `INSERT INTO ${t(brand, "sales_campaign_signups")}
+       (campaign_id, contact_id, email, phone, notify_via, source, ip_address, user_agent)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      campaign_id,
+      contact_id || null,
+      input.email || null,
+      input.phone || null,
+      input.notify_via || "email",
+      input.source || null,
+      ip || null,
+      user_agent || null,
+    ],
+  );
+  return rows[0];
+}
+
+async function listSignups({ client, brand, campaign_id, page = 1, page_size = 25, offset = 0 }) {
+  const run = exec(client);
+  const { rows: c } = await run(
+    `SELECT COUNT(*)::int AS total FROM ${t(brand, "sales_campaign_signups")} WHERE campaign_id = $1`,
+    [campaign_id],
+  );
+  const { rows } = await run(
+    `SELECT * FROM ${t(brand, "sales_campaign_signups")}
+      WHERE campaign_id = $1
+      ORDER BY signed_up_at DESC
+      LIMIT $2 OFFSET $3`,
+    [campaign_id, page_size, offset],
+  );
+  return {
+    data: rows,
+    meta: { page, page_size, total: c[0].total, has_more: offset + rows.length < c[0].total },
+  };
+}
+
+async function listPendingSignups({ client, brand, campaign_id }) {
+  const { rows } = await exec(client)(
+    `SELECT * FROM ${t(brand, "sales_campaign_signups")}
+      WHERE campaign_id = $1 AND notified_at IS NULL`,
+    [campaign_id],
+  );
+  return rows;
+}
+
+async function markSignupNotified({ client, brand, signup_id }) {
+  await exec(client)(
+    `UPDATE ${t(brand, "sales_campaign_signups")}
+        SET notified_at = now() WHERE signup_id = $1`,
+    [signup_id],
+  );
+}
+
+// ── Metrics (rollups live on the campaign row; daily series here) ──
+
+async function listDailyMetrics({ client, brand, campaign_id, from, to }) {
+  const params = [campaign_id];
+  let where = `WHERE campaign_id = $1`;
+  let i = 2;
+  if (from) {
+    where += ` AND metric_date >= $${i++}`;
+    params.push(from);
+  }
+  if (to) {
+    where += ` AND metric_date <= $${i++}`;
+    params.push(to);
+  }
+  const { rows } = await exec(client)(
+    `SELECT * FROM ${t(brand, "sales_campaign_metrics")} ${where}
+      ORDER BY metric_date ASC, metric_hour ASC NULLS LAST`,
+    params,
+  );
+  return rows;
+}
+
+module.exports = {
+  // campaigns
+  findAll,
+  findById,
+  findBySlug,
+  create,
+  update,
+  setStatus,
+  incrementCounters,
+  // products
+  listProducts,
+  addProduct,
+  findProductLink,
+  updateProduct,
+  removeProduct,
+  // signups
+  findSignup,
+  createSignup,
+  listSignups,
+  listPendingSignups,
+  markSignupNotified,
+  // metrics
+  listDailyMetrics,
+};

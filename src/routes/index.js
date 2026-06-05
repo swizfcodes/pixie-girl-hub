@@ -68,6 +68,7 @@ const publicInstallHubRouter = require("../modules/storefront/install-hub.routes
 const publicStylistVerifyRouter = require("../modules/stylist_programme/verify.routes");
 const publicReferralRouter = require("../modules/retention/referral.routes");
 const publicHairQuizRouter = require("../modules/retention/hair-quiz.routes");
+const publicCampaignRouter = require("../modules/sales_campaigns/campaigns.public.routes");
 
 // Webhooks
 const webhooksRouter = require("../modules/business_setup/webhooks.routes");
@@ -93,6 +94,7 @@ function mountRoutes(app) {
   publicRouter.use("/stylist-verify", publicStylistVerifyRouter);
   publicRouter.use("/referral", publicReferralRouter);
   publicRouter.use("/hair-quiz", publicHairQuizRouter);
+  publicRouter.use("/sale", publicCampaignRouter);
   app.use("/api/public", publicRouter);
 
   // ── Webhooks (signed payloads; auth via signature, not JWT) ──

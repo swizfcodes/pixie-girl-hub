@@ -1,0 +1,134 @@
+"use strict";
+
+// Mock the repo (DB) so discount-engine math can be tested in isolation.
+jest.mock("../../../src/modules/sales_campaigns/campaigns.repo", () => ({
+  listProducts: jest.fn().mockResolvedValue([]),
+  findById: jest.fn(),
+  findBySlug: jest.fn(),
+}));
+
+const repo = require("../../../src/modules/sales_campaigns/campaigns.repo");
+const service = require("../../../src/modules/sales_campaigns/campaigns.service");
+const discount = require("../../../src/modules/sales_campaigns/campaigns.discount.service");
+const wf = require("../../../src/workflows/engine");
+const { createSchema, signupSchema } = require("../../../src/modules/sales_campaigns/campaigns.validator");
+
+function liveCampaign(over = {}) {
+  return {
+    campaign_id: "11111111-1111-1111-1111-111111111111",
+    slug: "black-friday",
+    status: "live",
+    starts_at: new Date(Date.now() - 3600_000).toISOString(),
+    ends_at: new Date(Date.now() + 3600_000).toISOString(),
+    discount_type: "percentage",
+    discount_value: 0.5,
+    product_scope: "all",
+    min_order_value_ngn: null,
+    first_time_buyers_only: false,
+    customer_segment_id: null,
+    total_usage_limit: null,
+    total_usage_count: 0,
+    ...over,
+  };
+}
+
+describe("resolveState", () => {
+  test("before / live / ended", () => {
+    const future = new Date(Date.now() + 7200_000).toISOString();
+    const past = new Date(Date.now() - 7200_000).toISOString();
+    expect(service.resolveState({ status: "scheduled", starts_at: future, ends_at: future })).toBe("before");
+    expect(service.resolveState(liveCampaign())).toBe("live");
+    expect(service.resolveState({ status: "ended", starts_at: past, ends_at: past })).toBe("ended");
+  });
+});
+
+describe("workflow normaliseStages", () => {
+  test("defaults to a CEO stage when none given", () => {
+    const s = wf.normaliseStages({ stages: [{ order: 1 }] });
+    expect(s[0].approvers[0]).toEqual({ type: "role", value: "ceo" });
+  });
+  test("reads the simple approver_role form", () => {
+    const s = wf.normaliseStages({ stages: [{ step: 1, approver_role: "manager" }] });
+    expect(s[0].approvers[0]).toEqual({ type: "role", value: "manager" });
+  });
+});
+
+describe("createSchema validation", () => {
+  const base = {
+    name: "BF",
+    slug: "black-friday",
+    starts_at: "2026-11-27T00:00:00Z",
+    ends_at: "2026-11-30T23:59:59Z",
+    discount_type: "percentage",
+    discount_value: 0.2,
+  };
+  test("accepts a valid payload", () => {
+    expect(() => createSchema.parse(base)).not.toThrow();
+  });
+  test("rejects ends_at <= starts_at", () => {
+    expect(() => createSchema.parse({ ...base, ends_at: base.starts_at })).toThrow();
+  });
+  test("rejects percentage > 1", () => {
+    expect(() => createSchema.parse({ ...base, discount_value: 20 })).toThrow();
+  });
+  test("rejects a bad slug", () => {
+    expect(() => createSchema.parse({ ...base, slug: "Black Friday!" })).toThrow();
+  });
+});
+
+describe("signupSchema", () => {
+  test("requires email or phone", () => {
+    expect(() => signupSchema.parse({ notify_via: "email" })).toThrow();
+    expect(() => signupSchema.parse({ email: "a@b.com" })).not.toThrow();
+  });
+});
+
+describe("discount engine", () => {
+  beforeEach(() => repo.listProducts.mockResolvedValue([]));
+
+  test("applies a percentage discount to all in-scope items", async () => {
+    const res = await discount.resolveDiscount({
+      brand: "pixiegirl",
+      campaignRef: liveCampaign(),
+      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 2 }] },
+    });
+    expect(res.eligible).toBe(true);
+    expect(res.total_discount_ngn).toBe("100000.00"); // 50% of 100k * 2
+    expect(res.lines[0].discounted_unit_price_ngn).toBe("50000.00");
+  });
+
+  test("margin-floor clamp caps the discount", async () => {
+    const res = await discount.resolveDiscount({
+      brand: "pixiegirl",
+      campaignRef: liveCampaign(),
+      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }] },
+      getMarginFloor: async () => "60000.00", // never below 60k
+    });
+    expect(res.clamped).toBe(true);
+    expect(res.total_discount_ngn).toBe("40000.00"); // clamped from 50k to 40k
+    expect(res.lines[0].discounted_unit_price_ngn).toBe("60000.00");
+  });
+
+  test("rejects when below minimum order value", async () => {
+    const res = await discount.resolveDiscount({
+      brand: "pixiegirl",
+      campaignRef: liveCampaign({ min_order_value_ngn: "500000.00" }),
+      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }] },
+    });
+    expect(res.eligible).toBe(false);
+    expect(res.reason).toBe("below_min_order_value");
+  });
+
+  test("respects excluded products", async () => {
+    repo.listProducts.mockResolvedValue([
+      { include_exclude: "exclude", product_id: "p1", category_id: null },
+    ]);
+    const res = await discount.resolveDiscount({
+      brand: "pixiegirl",
+      campaignRef: liveCampaign(),
+      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }] },
+    });
+    expect(res.eligible).toBe(false);
+    expect(res.reason).toBe("no_eligible_items");
+  });
+});

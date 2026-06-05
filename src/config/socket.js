@@ -49,6 +49,10 @@ async function initSocketIo(httpServer) {
   // Bind handlers (room join/leave + module-specific event emitters)
   bindHandlers(io);
 
+  // Register module realtime relays (lazy require to avoid an init cycle)
+  const { registerCampaignRealtime } = require("../realtime/campaign-realtime");
+  registerCampaignRealtime();
+
   logger.info("socket.io initialised with redis adapter");
   return io;
 }

@@ -109,6 +109,12 @@ async function startWorkers() {
     runPendingActionExpirySweep,
   } = require("./schedulers/ai-pending-expiry");
   const { runLayawayReminders } = require("./schedulers/layaway-reminders");
+  const {
+    runCampaignStateTransitions,
+  } = require("./schedulers/campaign-state-transition");
+  const {
+    runCampaignMetricsRollup,
+  } = require("./schedulers/campaign-metrics-rollup");
 
   scheduleCron("daily-ai-briefing", "0 7 * * *", runDailyAiBriefing);
   scheduleCron("weekly-sales-report", "0 20 * * 6", runWeeklySalesReport);
@@ -122,6 +128,12 @@ async function startWorkers() {
     runPendingActionExpirySweep,
   );
   scheduleCron("layaway-reminders", "*/30 * * * *", runLayawayReminders);
+  scheduleCron(
+    "campaign-state-transition",
+    "* * * * *",
+    runCampaignStateTransitions,
+  );
+  scheduleCron("campaign-metrics-rollup", "*/5 * * * *", runCampaignMetricsRollup);
 }
 
 async function stopWorkers() {

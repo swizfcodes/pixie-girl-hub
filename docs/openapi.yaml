@@ -88,6 +88,41 @@ components:
                   type: string
         request_id:
           type: string
+    CampaignCreate:
+      type: object
+      required: [name, slug, starts_at, ends_at, discount_type, discount_value]
+      properties:
+        name: { type: string }
+        slug: { type: string, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }
+        description: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        discount_type:
+          type: string
+          enum: [percentage, fixed_amount, buy_x_get_y, bundle, free_shipping]
+        discount_value:
+          type: number
+          description: "Fraction for percentage (0.20 = 20%); NGN amount otherwise."
+        min_order_value_ngn: { type: number }
+        customer_segment_id: { type: string, format: uuid }
+        first_time_buyers_only: { type: boolean }
+        product_scope:
+          type: string
+          enum: [all, specific_products, specific_categories]
+        landing_hero_title: { type: string }
+        landing_hero_subtitle: { type: string }
+        landing_hero_image_url: { type: string, format: uri }
+        landing_cta_text: { type: string }
+        landing_blocks: { type: array, items: { type: object } }
+        total_usage_limit: { type: integer }
+    CampaignSignup:
+      type: object
+      properties:
+        email: { type: string, format: email }
+        phone: { type: string }
+        notify_via: { type: string, enum: [email, whatsapp, sms, both] }
+        source: { type: string }
+      description: "email or phone is required"
 
 paths:
   /auth/login:
@@ -114,4 +149,285 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  # TODO: 200+ more endpoints across 37 modules
+  # ── Sales Campaigns (Module 6.22) ───────────────────────────────
+  /sales-campaigns:
+    get:
+      summary: List campaigns
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: status, in: query, schema: { type: string }, description: "comma-separated status filter" }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 25, maximum: 100 } }
+      x-required-permission: "sales_campaigns.view"
+      x-entity-scope: brand
+      x-is-write: false
+      x-ai-enabled: false
+      responses:
+        "200": { description: A page of campaigns }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      summary: Create a campaign (draft)
+      tags: [sales_campaigns]
+      parameters: [ { $ref: "#/components/parameters/BrandContext" } ]
+      x-required-permission: "sales_campaigns.create"
+      x-entity-scope: brand
+      x-is-write: true
+      x-ai-enabled: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CampaignCreate" }
+      responses:
+        "201": { description: Created }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { description: Slug already in use }
+
+  /sales-campaigns/{id}:
+    parameters:
+      - $ref: "#/components/parameters/BrandContext"
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Get a campaign (with products + rollups)
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.view"
+      x-entity-scope: brand
+      x-is-write: false
+      responses:
+        "200": { description: Campaign detail }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: Update a campaign (draft/scheduled/paused only)
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.edit"
+      x-entity-scope: brand
+      x-is-write: true
+      responses:
+        "200": { description: Updated }
+        "409": { description: Invalid state for edit }
+    delete:
+      summary: Archive a campaign
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.delete"
+      x-entity-scope: brand
+      x-is-write: true
+      responses:
+        "204": { description: Archived }
+
+  /sales-campaigns/{id}/submit:
+    post:
+      summary: Submit a draft campaign for approval (opens workflow)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.edit"
+      x-entity-scope: brand
+      x-is-write: true
+      responses:
+        "200": { description: Now pending_approval }
+        "409": { description: Not in draft state }
+
+  /sales-campaigns/{id}/approve:
+    post:
+      summary: Approve a pending campaign (CEO/manager)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.approve"
+      x-entity-scope: brand
+      x-is-write: true
+      responses:
+        "200": { description: Approved → scheduled }
+
+  /sales-campaigns/{id}/reject:
+    post:
+      summary: Reject a pending campaign (back to draft)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.approve"
+      x-entity-scope: brand
+      x-is-write: true
+      responses:
+        "200": { description: Rejected → draft }
+
+  /sales-campaigns/{id}/launch:
+    post:
+      summary: Manually launch an approved campaign (→ live)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.edit"
+      x-entity-scope: brand
+      x-is-write: true
+      responses:
+        "200": { description: Live }
+        "409": { description: Not approved / wrong state }
+
+  /sales-campaigns/{id}/pause:
+    post: { summary: Pause a live campaign, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.edit", x-is-write: true, responses: { "200": { description: Paused } } }
+  /sales-campaigns/{id}/resume:
+    post: { summary: Resume a paused campaign, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.edit", x-is-write: true, responses: { "200": { description: Live } } }
+  /sales-campaigns/{id}/end:
+    post: { summary: End a campaign early, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.edit", x-is-write: true, responses: { "200": { description: Ended } } }
+  /sales-campaigns/{id}/duplicate:
+    post: { summary: Clone a campaign into a new draft, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.create", x-is-write: true, responses: { "201": { description: New draft } } }
+
+  /sales-campaigns/{id}/products:
+    parameters:
+      - $ref: "#/components/parameters/BrandContext"
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: List campaign products (include/exclude)
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Product links } }
+    post:
+      summary: Add an include/exclude product or category
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.edit"
+      x-is-write: true
+      responses: { "201": { description: Added } }
+
+  /sales-campaigns/{id}/products/{linkId}:
+    parameters:
+      - $ref: "#/components/parameters/BrandContext"
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: linkId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      summary: Update a campaign product link
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.edit"
+      x-is-write: true
+      responses: { "200": { description: Updated } }
+    delete:
+      summary: Remove a campaign product link
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.edit"
+      x-is-write: true
+      responses: { "204": { description: Removed } }
+
+  /sales-campaigns/{id}/landing:
+    parameters:
+      - $ref: "#/components/parameters/BrandContext"
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      summary: Get landing-page config
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Landing config } }
+    patch:
+      summary: Update landing-page config
+      tags: [sales_campaigns]
+      x-required-permission: "sales_campaigns.edit"
+      x-is-write: true
+      responses: { "200": { description: Updated } }
+
+  /sales-campaigns/{id}/preview:
+    get:
+      summary: Render landing payload for a given state (admin preview)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: state, in: query, schema: { type: string, enum: [before, live, ended] } }
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Landing payload } }
+
+  /sales-campaigns/{id}/share-kit:
+    get:
+      summary: Pre-formatted social/WhatsApp/email copy + UTM links
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Share kit } }
+
+  /sales-campaigns/{id}/signups:
+    get:
+      summary: List pre-launch notification signups
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Signups page } }
+
+  /sales-campaigns/{id}/metrics:
+    get:
+      summary: Current rollups + live snapshot (revenue ticker)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Metrics } }
+
+  /sales-campaigns/{id}/metrics/daily:
+    get:
+      summary: Daily/hourly metric series (chart)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Metric series } }
+
+  /sales-campaigns/{id}/report:
+    get:
+      summary: Post-campaign report (JSON; ?format=pdf for a stored PDF link)
+      tags: [sales_campaigns]
+      parameters:
+        - $ref: "#/components/parameters/BrandContext"
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: format, in: query, schema: { type: string, enum: [json, pdf] } }
+      x-required-permission: "sales_campaigns.view"
+      responses: { "200": { description: Report } }
+
+  # ── Public (no auth) — served under /api/public, not /api/v1 ──────
+  /sale/{slug}:
+    get:
+      summary: "[public] Campaign landing payload (before/live/ended)"
+      security: []
+      tags: [sales_campaigns_public]
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Landing payload }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /sale/{slug}/stock:
+    get:
+      summary: "[public] Live stock counters"
+      security: []
+      tags: [sales_campaigns_public]
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: Stock counters } }
+  /sale/{slug}/signup:
+    post:
+      summary: "[public] Pre-launch notification signup (rate-limited)"
+      security: []
+      tags: [sales_campaigns_public]
+      parameters:
+        - { name: slug, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CampaignSignup" }
+      responses:
+        "201": { description: Signed up }
+        "200": { description: Already signed up }
+        "429": { description: Too many requests }
+
+  # TODO: 200+ more endpoints across the other 36 modules
