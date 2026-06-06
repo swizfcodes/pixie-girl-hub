@@ -1,0 +1,363 @@
+/**
+ * Identity & Access Administration service (V2.2 §3 — RBAC).
+ *
+ * Orchestrates role definitions, the role→permission matrix, user-role grants,
+ * and per-user brand access. Every mutation is audited as sensitive and
+ * emits a domain event. Escalation guards (access.guards) stop a delegated
+ * `settings` admin from granting themselves the owner role or rewriting
+ * system roles; the owner/CEO bypasses them.
+ *
+ * Note: the RBAC middleware reads shared.permissions directly (no cache), so
+ * matrix and grant changes take effect on the user's next request.
+ */
+
+"use strict";
+
+const rolesRepo = require("./roles.repo");
+const grantsRepo = require("./grants.repo");
+const guards = require("./access.guards");
+const catalog = require("./access.catalog");
+const events = require("./access.events");
+const { audit } = require("../../middleware/audit");
+const { transaction } = require("../../config/database");
+const {
+  NotFoundError,
+  ConflictError,
+  ValidationError,
+} = require("../../utils/errors");
+
+function sensitiveAudit(fields) {
+  return audit({ ...fields, is_sensitive: true });
+}
+
+// ── roles ──────────────────────────────────────────────────
+
+async function listRoles({ brand }) {
+  return { data: await rolesRepo.listRoles({ business: brand }) };
+}
+
+async function getRole({ role_id }) {
+  const role = await rolesRepo.findRole({ role_id });
+  if (!role) throw new NotFoundError("Role");
+  const [permissions, members] = await Promise.all([
+    rolesRepo.listPermissions({ role_id }),
+    grantsRepo.listRoleMembers({ role_id }),
+  ]);
+  return { ...role, permissions, members };
+}
+
+async function createRole({ brand, user, request_id, input }) {
+  // A system-wide role (business = null) may only be created by the owner.
+  const business = input.scope === "system" ? null : brand;
+  if (business === null && !guards.isOwnerActor(user)) {
+    throw new ValidationError("Only the owner can create a system-wide role");
+  }
+  const dupe = await rolesRepo.findRoleByName({
+    role_name: input.role_name,
+    business,
+  });
+  if (dupe) throw new ConflictError("A role with that name already exists");
+
+  return transaction(async (client) => {
+    const role = await rolesRepo.createRole({
+      client,
+      role_name: input.role_name,
+      description: input.description,
+      business,
+    });
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.create_role",
+      target_type: "roles",
+      target_id: role.role_id,
+      after: role,
+      request_id,
+    });
+    events.emit("role_created", { brand, role_id: role.role_id });
+    return role;
+  });
+}
+
+async function updateRole({ brand, user, request_id, role_id, patch }) {
+  const role = await rolesRepo.findRole({ role_id });
+  if (!role) throw new NotFoundError("Role");
+  guards.assertCanMutateRole(user, role);
+
+  if (patch.role_name && patch.role_name !== role.role_name) {
+    const dupe = await rolesRepo.findRoleByName({
+      role_name: patch.role_name,
+      business: role.business,
+    });
+    if (dupe) throw new ConflictError("A role with that name already exists");
+  }
+
+  return transaction(async (client) => {
+    const updated = await rolesRepo.updateRole({
+      client,
+      role_id,
+      patch: {
+        role_name: patch.role_name,
+        description: patch.description,
+      },
+    });
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.update_role",
+      target_type: "roles",
+      target_id: role_id,
+      before: role,
+      after: updated,
+      request_id,
+    });
+    events.emit("role_updated", { brand, role_id });
+    return updated;
+  });
+}
+
+async function deleteRole({ brand, user, request_id, role_id }) {
+  const role = await rolesRepo.findRole({ role_id });
+  if (!role) throw new NotFoundError("Role");
+  guards.assertCanDeleteRole(user, role);
+
+  return transaction(async (client) => {
+    await rolesRepo.deleteRole({ client, role_id });
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.delete_role",
+      target_type: "roles",
+      target_id: role_id,
+      before: role,
+      request_id,
+    });
+    events.emit("role_deleted", { brand, role_id });
+  });
+}
+
+// ── permission matrix ──────────────────────────────────────
+
+function getCatalog() {
+  return catalog.catalog();
+}
+
+async function getRolePermissions({ role_id }) {
+  const role = await rolesRepo.findRole({ role_id });
+  if (!role) throw new NotFoundError("Role");
+  return { data: await rolesRepo.listPermissions({ role_id }) };
+}
+
+function validateGrants(grants) {
+  const seen = new Set();
+  for (const g of grants) {
+    if (!catalog.isValidModule(g.module)) {
+      throw new ValidationError(`Unknown module '${g.module}'`);
+    }
+    if (!catalog.isValidAction(g.action)) {
+      throw new ValidationError(`Unknown action '${g.action}'`);
+    }
+    if (g.record_scope && !catalog.isValidScope(g.record_scope)) {
+      throw new ValidationError(`Invalid record_scope '${g.record_scope}'`);
+    }
+    const key = `${g.module}.${g.action}`;
+    if (seen.has(key)) {
+      throw new ValidationError(`Duplicate grant for '${key}'`);
+    }
+    seen.add(key);
+  }
+}
+
+async function setRolePermissions({
+  brand,
+  user,
+  request_id,
+  role_id,
+  grants,
+}) {
+  const role = await rolesRepo.findRole({ role_id });
+  if (!role) throw new NotFoundError("Role");
+  guards.assertCanEditPermissions(user, role);
+  validateGrants(grants);
+
+  return transaction(async (client) => {
+    const before = await rolesRepo.listPermissions({ client, role_id });
+    const after = await rolesRepo.replacePermissions({
+      client,
+      role_id,
+      grants,
+    });
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.set_permissions",
+      target_type: "permissions",
+      target_id: role_id,
+      before: { permissions: before },
+      after: { permissions: after },
+      request_id,
+    });
+    events.emit("permissions_changed", { brand, role_id });
+    return { data: after };
+  });
+}
+
+// ── user-role grants ───────────────────────────────────────
+
+async function listUserRoles({ user_id }) {
+  return { data: await grantsRepo.listUserRoles({ user_id }) };
+}
+
+async function assertBusinessValue(client, business) {
+  if (business === "*") return;
+  const brands = await grantsRepo.validBrands({ client });
+  if (!brands.includes(business)) {
+    throw new ValidationError(`Unknown business '${business}'`);
+  }
+}
+
+async function grantUserRole({ brand, user, request_id, user_id, input }) {
+  const role = await rolesRepo.findRole({ role_id: input.role_id });
+  if (!role) throw new NotFoundError("Role");
+  guards.assertCanGrantRole(user, role);
+
+  const target = await grantsRepo.userExists({ user_id });
+  if (!target) throw new NotFoundError("User");
+
+  return transaction(async (client) => {
+    await assertBusinessValue(client, input.business);
+    const grant = await grantsRepo.grantRole({
+      client,
+      user_id,
+      role_id: input.role_id,
+      business: input.business,
+      granted_by: user.user_id,
+      expires_at: input.expires_at,
+    });
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.grant_role",
+      target_type: "user_roles",
+      target_id: user_id,
+      after: grant,
+      request_id,
+    });
+    events.emit("role_granted", {
+      brand,
+      user_id,
+      role_id: input.role_id,
+    });
+    return grant;
+  });
+}
+
+async function revokeUserRole({
+  brand,
+  user,
+  request_id,
+  user_id,
+  role_id,
+  business,
+}) {
+  const role = await rolesRepo.findRole({ role_id });
+  if (!role) throw new NotFoundError("Role");
+  guards.assertCanRevokeRole(user, role);
+
+  return transaction(async (client) => {
+    // Never strand the system without an owner.
+    if (guards.isOwnerRole(role)) {
+      const holders = await grantsRepo.countActiveRoleHolders({
+        client,
+        role_id,
+      });
+      if (holders <= 1) {
+        throw new ConflictError("Cannot revoke the last owner");
+      }
+    }
+    const removed = await grantsRepo.revokeRole({
+      client,
+      user_id,
+      role_id,
+      business,
+    });
+    if (!removed) throw new NotFoundError("Grant");
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.revoke_role",
+      target_type: "user_roles",
+      target_id: user_id,
+      before: { role_id, business },
+      request_id,
+    });
+    events.emit("role_revoked", { brand, user_id, role_id });
+  });
+}
+
+// ── brand access ───────────────────────────────────────────
+
+async function getUserAccess({ user_id }) {
+  const access = await grantsRepo.getUserAccess({ user_id });
+  if (!access) throw new NotFoundError("User");
+  return access;
+}
+
+async function setUserAccess({ brand, user, request_id, user_id, input }) {
+  const before = await grantsRepo.getUserAccess({ user_id });
+  if (!before) throw new NotFoundError("User");
+
+  return transaction(async (client) => {
+    if (input.permitted_businesses) {
+      const brands = await grantsRepo.validBrands({ client });
+      for (const b of input.permitted_businesses) {
+        if (!brands.includes(b)) {
+          throw new ValidationError(`Unknown business '${b}'`);
+        }
+      }
+    }
+    if (input.default_business) {
+      const permitted =
+        input.permitted_businesses || before.permitted_businesses || [];
+      if (!permitted.includes(input.default_business)) {
+        throw new ValidationError(
+          "default_business must be one of permitted_businesses",
+        );
+      }
+    }
+    const after = await grantsRepo.setUserAccess({
+      client,
+      user_id,
+      permitted_businesses: input.permitted_businesses,
+      default_business: input.default_business,
+    });
+    await sensitiveAudit({
+      business: brand,
+      user_id: user.user_id,
+      action_key: "access.set_user_access",
+      target_type: "users",
+      target_id: user_id,
+      before,
+      after,
+      request_id,
+    });
+    events.emit("user_access_changed", { brand, user_id });
+    return after;
+  });
+}
+
+module.exports = {
+  listRoles,
+  getRole,
+  createRole,
+  updateRole,
+  deleteRole,
+  getCatalog,
+  getRolePermissions,
+  setRolePermissions,
+  listUserRoles,
+  grantUserRole,
+  revokeUserRole,
+  getUserAccess,
+  setUserAccess,
+};

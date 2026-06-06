@@ -19,10 +19,11 @@ const { authMiddleware } = require("../middleware/auth");
 const { brandContextMiddleware } = require("../middleware/brand-context");
 
 // Auth & user-management
-const authRouter = require("../modules/hr_payroll/auth.routes");
+const authRouter = require("../shared/hr_payroll/auth.routes");
 
 // Module routers — each exports an Express Router
 const crmRouter = require("../modules/crm/crm.routes");
+const catalogueRouter = require("../modules/catalogue/catalogue.routes");
 const salesRouter = require("../modules/sales/sales.routes");
 const posRouter = require("../modules/pos/pos.routes");
 const storefrontRouter = require("../modules/storefront/storefront.routes");
@@ -32,16 +33,16 @@ const expensesRouter = require("../modules/expenses/expenses.routes");
 const purchasingRouter = require("../modules/purchasing/purchasing.routes");
 const stockRouter = require("../modules/stock/stock.routes");
 const logisticsRouter = require("../modules/logistics/logistics.routes");
-const hrPayrollRouter = require("../modules/hr_payroll/hr.routes");
+const hrPayrollRouter = require("../shared/hr_payroll/hr.routes");
 const attendanceRouter = require("../modules/attendance/attendance.routes");
-const contactsRouter = require("../modules/contacts/contacts.routes");
-const documentsRouter = require("../modules/documents/documents.routes");
+const contactsRouter = require("../shared/contacts/contacts.routes");
+const documentsRouter = require("../shared/documents/documents.routes");
 const socialMediaRouter = require("../modules/social_media/social.routes");
 const marketingRouter = require("../modules/marketing/marketing.routes");
 const emailCampaignsRouter = require("../modules/email_campaigns/email-campaigns.routes");
 const smartcommRouter = require("../modules/smartcomm/smartcomm.routes");
-const calendarRouter = require("../modules/calendar/calendar.routes");
-const tasksRouter = require("../modules/tasks/tasks.routes");
+const calendarRouter = require("../shared/calendar/calendar.routes");
+const tasksRouter = require("../shared/tasks/tasks.routes");
 const dashboardsRouter = require("../modules/dashboards/dashboards.routes");
 const businessSetupRouter = require("../modules/business_setup/business-setup.routes");
 const salesCampaignsRouter = require("../modules/sales_campaigns/campaigns.routes");
@@ -50,7 +51,7 @@ const productionRouter = require("../modules/production/production.routes");
 const serviceJobsRouter = require("../modules/service_jobs/service-jobs.routes");
 const pricingRouter = require("../modules/pricing/pricing.routes");
 const stylistRouter = require("../modules/stylist_programme/stylist.routes");
-const orgWorkflowRouter = require("../modules/org_workflow/org.routes");
+const orgWorkflowRouter = require("../shared/org_workflow/org.routes");
 const storefrontStudioRouter = require("../modules/storefront_studio/studio.routes");
 const intercompanyRouter = require("../modules/intercompany/intercompany.routes");
 const praxisRouter = require("../modules/praxis_ai/praxis.routes");
@@ -58,7 +59,8 @@ const aiInsightsRouter = require("../modules/ai_insights/insights.routes");
 const aiGovernanceRouter = require("../modules/ai_governance/governance.routes");
 const retailPartnersRouter = require("../modules/retail_partners/partners.routes");
 const cashRequestRouter = require("../modules/cash_request/cash-request.routes");
-const auditRouter = require("../modules/audit/audit.routes");
+const auditRouter = require("../shared/audit/audit.routes");
+const accessRouter = require("../shared/access/access.routes");
 
 // Public (storefront-facing, no auth)
 const publicCatalogueRouter = require("../modules/storefront/public.routes");
@@ -69,6 +71,7 @@ const publicStylistVerifyRouter = require("../modules/stylist_programme/verify.r
 const publicReferralRouter = require("../modules/retention/referral.routes");
 const publicHairQuizRouter = require("../modules/retention/hair-quiz.routes");
 const publicCampaignRouter = require("../modules/sales_campaigns/campaigns.public.routes");
+const publicSignRouter = require("../shared/documents/documents.esign.public.routes");
 
 // Webhooks
 const webhooksRouter = require("../modules/business_setup/webhooks.routes");
@@ -95,6 +98,7 @@ function mountRoutes(app) {
   publicRouter.use("/referral", publicReferralRouter);
   publicRouter.use("/hair-quiz", publicHairQuizRouter);
   publicRouter.use("/sale", publicCampaignRouter);
+  publicRouter.use("/sign", publicSignRouter);
   app.use("/api/public", publicRouter);
 
   // ── Webhooks (signed payloads; auth via signature, not JWT) ──
@@ -110,6 +114,7 @@ function mountRoutes(app) {
   api.use(brandContextMiddleware);
 
   api.use("/crm", crmRouter);
+  api.use("/catalogue", catalogueRouter);
   api.use("/sales", salesRouter);
   api.use("/pos", posRouter);
   api.use("/storefront", storefrontRouter);
@@ -146,6 +151,7 @@ function mountRoutes(app) {
   api.use("/retail-partners", retailPartnersRouter);
   api.use("/cash-request", cashRequestRouter);
   api.use("/audit", auditRouter);
+  api.use("/access", accessRouter);
 
   app.use("/api/v1", api);
 }

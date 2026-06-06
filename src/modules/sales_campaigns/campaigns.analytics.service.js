@@ -78,7 +78,8 @@ async function computeMetrics({ client, brand, campaign }) {
     orders_count: orders,
     revenue_ngn: revenue,
     discount_given_ngn: Number(o.discount_given_ngn) || 0,
-    average_order_value_ngn: orders > 0 ? Number((revenue / orders).toFixed(2)) : 0,
+    average_order_value_ngn:
+      orders > 0 ? Number((revenue / orders).toFixed(2)) : 0,
     conversion_rate_pct: unique > 0 ? Number((orders / unique).toFixed(4)) : 0,
     add_to_cart_rate_pct:
       unique > 0 ? Number(((v.add_to_cart || 0) / unique).toFixed(4)) : 0,
@@ -175,7 +176,10 @@ async function rollupAllLive() {
         await rollupCampaign({ brand, campaign_id: r.campaign_id });
         count++;
       } catch (err) {
-        logger.error({ err, brand, campaign_id: r.campaign_id }, "campaign rollup failed");
+        logger.error(
+          { err, brand, campaign_id: r.campaign_id },
+          "campaign rollup failed",
+        );
       }
     }
   }

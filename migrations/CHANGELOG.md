@@ -85,8 +85,8 @@ Cash Request = shared table with `business` discriminator.
   delivery_letter_renders (QR reuses public_tracking_token).
 - **B-10** `000101_shared_esignature.sql` — **full e-signature workflow.**
   signature_requests + signers (exactly-one-of user/contact/external CHECK)
-  + tamper-evident audit_events (append-only, hash-chained). documents gains
-  signing_state + frozen_at + a frozen-doc lock trigger.
+  - tamper-evident audit_events (append-only, hash-chained). documents gains
+    signing_state + frozen_at + a frozen-doc lock trigger.
 
 ### Bucket C — architectural
 
@@ -107,15 +107,15 @@ Cash Request = shared table with `business` discriminator.
 
 ### Net schema delta
 
-| Layer | Before | After |
-|---|---|---|
-| shared base tables | 107 | 119 |
-| pixiegirl base tables | 159 | 173 |
-| faitlynhair base tables | 159 | 173 |
-| **total base tables** | **425** | **465** |
-| restricted views / brand | 0 | 6 |
-| shared RLS policies | 0 | 63 |
-| soft-FK registrations | 0 | 8 |
+| Layer                    | Before  | After   |
+| ------------------------ | ------- | ------- |
+| shared base tables       | 107     | 119     |
+| pixiegirl base tables    | 159     | 173     |
+| faitlynhair base tables  | 159     | 173     |
+| **total base tables**    | **425** | **465** |
+| restricted views / brand | 0       | 6       |
+| shared RLS policies      | 0       | 63      |
+| soft-FK registrations    | 0       | 8       |
 
 ### App-layer follow-ups (TODO, documented not coded)
 
@@ -171,24 +171,24 @@ V2.2 added five concrete refinements over V2.1:
 
 ### Files edited in place
 
-| File | What changed | Why |
-|---|---|---|
-| `000003_shared_people.sql` | `staff_profiles`: added probation_*, annual_leave_*, public_holiday_*, special_event_days_*, non_solicit_*, dismissal_triggers_log | Module 6.11 — Faitlyn HR fields |
-| `000003_shared_people.sql` | `staff_profiles`: added 2 partial indexes (probation ending, non-solicit active) | Common HR queries from spec |
-| `000003_shared_people.sql` | `leave_requests`: extended `leave_type` CHECK to include `special_event_in_lieu`, `public_holiday`, `bereavement` | Module 6.11 leave types |
-| `000003_shared_people.sql` | `org_positions`: added `reports_to_position_id` (solid-line FK), `is_deputy` flag, `deputy_capacities[]`, `approval_threshold_ngn` | Module 6.27 — deputy pattern + thresholds |
-| `000003_shared_people.sql` | **NEW table** `org_position_dotted_lines` | Module 6.27 — dotted-line reporting (info-only, never used for approval routing) |
-| `000003_shared_people.sql` | `workflow_definitions` comment: expanded JSON shape to document amount thresholds, deputy fallback, dotted-line non-routing | Module 6.27 — clarification for engineers |
-| `000012_shared_ai.sql` | `ai_action_catalogue`: **removed inline `embedding vector(1536)` column**, added `title`, `entity_scope` (pxg/flh/both/any), `is_write` boolean; dropped `idx_ai_actions_embedding` (moves to new table) | V2.2 §8.1 (embeddings in dedicated table) + §8.3 (entity_scope, is_write) |
-| `000012_shared_ai.sql` | `ai_knowledge_chunks`: **removed inline `embedding vector(1536) NOT NULL`**; added `required_permissions[]`, `sensitivity`, `contains_field_tags[]`, `content_hash`; widened source_type CHECK to include `action_catalogue` and `action_example` | V2.2 §8.4 (permission-scoped retrieval BEFORE similarity ranking) + §8.1 (dedicated embeddings table) |
-| `000012_shared_ai.sql` | **NEW table** `shared.ai_embeddings` (the dedicated embeddings store) — soft FKs by `(source_table, source_id, source_sub_key)`, columns for `embedding_model`, `embedding_version`, `embedding_dim`, retained `source_text`, denormalised `business` + `required_permissions[]` + `sensitivity` for filter-before-rank, `is_stale` flag for migrations | V2.2 §8.1 ("a future move off vector(1536) becomes a controlled migration, with no data loss and no core-schema disruption") |
-| `000012_shared_ai.sql` | **NEW table** `shared.ai_vendor_credentials` — encrypted multi-vendor API key store; cost tables (per-1k input/output tokens, per-audio-minute); per-vendor monthly caps | V2.2 §8.1 ("three vendor keys, stored encrypted, CEO-controlled, AI Control meters per-vendor usage") |
-| `000012_shared_ai.sql` | `ai_usage_ledger`: added `audio_seconds` column; clarified `provider` semantics | V2.2 §8.1 (Groq Whisper bills per minute, needs separate tracking) |
-| `000012_shared_ai.sql` | `ai_usage_daily`: added `vendor` to the unique key; added `audio_seconds` aggregate | Per-vendor live spend meter on AI Control dashboard |
-| `000014_shared_triggers.sql` | `fn_ai_usage_rollup()` updated to include `vendor` and `audio_seconds` in the daily aggregate | Matches the schema change above |
-| `000015_shared_seed_data.sql` | Changed `praxis_voice` default_provider from `self_whisper` to `groq`, default_model unchanged | V2.2 §8.1 (Groq Whisper API replaces self-hosted) |
-| `000015_shared_seed_data.sql` | Added 3 new feature flags: `insights_weekly_report`, `insights_service_match`, `embeddings` | Module 6.30 weekly report auto-gen; service-job anti-pocketing; embeddings as a costed feature |
-| `000015_shared_seed_data.sql` | Seeded `shared.ai_vendor_credentials` with the 3 launch vendors and current public per-token pricing | Bootstrap the multi-vendor metering |
+| File                          | What changed                                                                                                                                                                                                                                                                                                                                            | Why                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `000003_shared_people.sql`    | `staff_profiles`: added probation*\*, annual_leave*_, public*holiday*_, special*event_days*_, non*solicit*_, dismissal_triggers_log                                                                                                                                                                                                                     | Module 6.11 — Faitlyn HR fields                                                                                              |
+| `000003_shared_people.sql`    | `staff_profiles`: added 2 partial indexes (probation ending, non-solicit active)                                                                                                                                                                                                                                                                        | Common HR queries from spec                                                                                                  |
+| `000003_shared_people.sql`    | `leave_requests`: extended `leave_type` CHECK to include `special_event_in_lieu`, `public_holiday`, `bereavement`                                                                                                                                                                                                                                       | Module 6.11 leave types                                                                                                      |
+| `000003_shared_people.sql`    | `org_positions`: added `reports_to_position_id` (solid-line FK), `is_deputy` flag, `deputy_capacities[]`, `approval_threshold_ngn`                                                                                                                                                                                                                      | Module 6.27 — deputy pattern + thresholds                                                                                    |
+| `000003_shared_people.sql`    | **NEW table** `org_position_dotted_lines`                                                                                                                                                                                                                                                                                                               | Module 6.27 — dotted-line reporting (info-only, never used for approval routing)                                             |
+| `000003_shared_people.sql`    | `workflow_definitions` comment: expanded JSON shape to document amount thresholds, deputy fallback, dotted-line non-routing                                                                                                                                                                                                                             | Module 6.27 — clarification for engineers                                                                                    |
+| `000012_shared_ai.sql`        | `ai_action_catalogue`: **removed inline `embedding vector(1536)` column**, added `title`, `entity_scope` (pxg/flh/both/any), `is_write` boolean; dropped `idx_ai_actions_embedding` (moves to new table)                                                                                                                                                | V2.2 §8.1 (embeddings in dedicated table) + §8.3 (entity_scope, is_write)                                                    |
+| `000012_shared_ai.sql`        | `ai_knowledge_chunks`: **removed inline `embedding vector(1536) NOT NULL`**; added `required_permissions[]`, `sensitivity`, `contains_field_tags[]`, `content_hash`; widened source_type CHECK to include `action_catalogue` and `action_example`                                                                                                       | V2.2 §8.4 (permission-scoped retrieval BEFORE similarity ranking) + §8.1 (dedicated embeddings table)                        |
+| `000012_shared_ai.sql`        | **NEW table** `shared.ai_embeddings` (the dedicated embeddings store) — soft FKs by `(source_table, source_id, source_sub_key)`, columns for `embedding_model`, `embedding_version`, `embedding_dim`, retained `source_text`, denormalised `business` + `required_permissions[]` + `sensitivity` for filter-before-rank, `is_stale` flag for migrations | V2.2 §8.1 ("a future move off vector(1536) becomes a controlled migration, with no data loss and no core-schema disruption") |
+| `000012_shared_ai.sql`        | **NEW table** `shared.ai_vendor_credentials` — encrypted multi-vendor API key store; cost tables (per-1k input/output tokens, per-audio-minute); per-vendor monthly caps                                                                                                                                                                                | V2.2 §8.1 ("three vendor keys, stored encrypted, CEO-controlled, AI Control meters per-vendor usage")                        |
+| `000012_shared_ai.sql`        | `ai_usage_ledger`: added `audio_seconds` column; clarified `provider` semantics                                                                                                                                                                                                                                                                         | V2.2 §8.1 (Groq Whisper bills per minute, needs separate tracking)                                                           |
+| `000012_shared_ai.sql`        | `ai_usage_daily`: added `vendor` to the unique key; added `audio_seconds` aggregate                                                                                                                                                                                                                                                                     | Per-vendor live spend meter on AI Control dashboard                                                                          |
+| `000014_shared_triggers.sql`  | `fn_ai_usage_rollup()` updated to include `vendor` and `audio_seconds` in the daily aggregate                                                                                                                                                                                                                                                           | Matches the schema change above                                                                                              |
+| `000015_shared_seed_data.sql` | Changed `praxis_voice` default_provider from `self_whisper` to `groq`, default_model unchanged                                                                                                                                                                                                                                                          | V2.2 §8.1 (Groq Whisper API replaces self-hosted)                                                                            |
+| `000015_shared_seed_data.sql` | Added 3 new feature flags: `insights_weekly_report`, `insights_service_match`, `embeddings`                                                                                                                                                                                                                                                             | Module 6.30 weekly report auto-gen; service-job anti-pocketing; embeddings as a costed feature                               |
+| `000015_shared_seed_data.sql` | Seeded `shared.ai_vendor_credentials` with the 3 launch vendors and current public per-token pricing                                                                                                                                                                                                                                                    | Bootstrap the multi-vendor metering                                                                                          |
 
 ### Schema-wide impact summary
 
@@ -222,6 +222,7 @@ These are planned for the per-business template build, not patches.
 
 All 16 shared migrations apply cleanly with `ON_ERROR_STOP=1` against
 PostgreSQL 16 + pgvector 0.6. End-to-end test confirms:
+
 - Embedding model versioning (two versions side-by-side, stale flag)
 - Permission-scoped retrieval (array containment filter before
   vector similarity)

@@ -123,7 +123,10 @@ async function duplicate(req, res) {
 }
 
 async function listProducts(req, res) {
-  const data = await service.listProducts({ brand: req.brand, id: req.params.id });
+  const data = await service.listProducts({
+    brand: req.brand,
+    id: req.params.id,
+  });
   res.json({ data });
 }
 
@@ -162,7 +165,10 @@ async function removeProduct(req, res) {
 }
 
 async function getLanding(req, res) {
-  const data = await service.getLanding({ brand: req.brand, id: req.params.id });
+  const data = await service.getLanding({
+    brand: req.brand,
+    id: req.params.id,
+  });
   res.json({ data });
 }
 
@@ -207,7 +213,10 @@ async function listSignups(req, res) {
 }
 
 async function metrics(req, res) {
-  const data = await service.getMetrics({ brand: req.brand, id: req.params.id });
+  const data = await service.getMetrics({
+    brand: req.brand,
+    id: req.params.id,
+  });
   res.json({ data });
 }
 

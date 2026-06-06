@@ -83,7 +83,9 @@ BEGIN
     ('{{BUSINESS}}', 'consignment_movement',          v_prefix || '-CON',  4, 1),
     ('{{BUSINESS}}', 'email_campaign',                v_prefix || '-EML',  4, 1),
     ('{{BUSINESS}}', 'report_run',                    v_prefix || '-RPT',  4, 1),
-    ('{{BUSINESS}}', 'cancellation_request',          v_prefix || '-CAN',  4, 1)
+    ('{{BUSINESS}}', 'cancellation_request',          v_prefix || '-CAN',  4, 1),
+    -- Generic registry for every uploaded/generated file routed through the Documents module (6.13)
+    ('{{BUSINESS}}', 'document',                      v_prefix || '-DOC',  6, 1)
   ON CONFLICT (business, document_type) DO NOTHING;
 END;
 $$;

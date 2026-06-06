@@ -1,12 +1,12 @@
 /**
- * Accounting & Finance (V2.2 §6.6)
- * Business logic layer. Repos handle SQL; controllers handle HTTP.
- * This file is where:
- *   - Validation beyond shape (cross-field, against DB state)
- *   - Workflow routing (approval / multi-step)
- *   - Domain event emission (for real-time + AI)
- *   - Audit logging
- *   - Transaction orchestration
+ * Accounting & Finance (V2.2 §6.6) — business logic.
+ *
+ * `postEntry` is THE canonical write path for the general ledger. Every other
+ * module (Sales, Invoicing, Expenses, Purchasing, Payroll) posts journals by
+ * calling it — never by touching journal_entries / journal_lines directly.
+ * It resolves account codes → ids, asserts debits = credits, resolves the
+ * open fiscal period, writes the entry + lines, then flips status to 'posted'
+ * (the DB trigger re-checks the balance and locks the entry).
  */
 
 "use strict";
@@ -15,83 +15,395 @@ const repo = require("./accounting.repo");
 const events = require("./accounting.events");
 const { audit } = require("../../middleware/audit");
 const { transaction } = require("../../config/database");
+const { money, toCurrencyString } = require("../../utils/money");
 const { NotFoundError, AppError } = require("../../utils/errors");
 
-async function list({ brand, user, scope, filters, page, page_size }) {
-  return repo.findAll({
-    brand,
-    scope,
-    user_id: user.user_id,
-    filters,
-    page,
-    page_size,
-  });
+async function resolveAccountId({ client, brand, line }) {
+  if (line.account_id) return line.account_id;
+  if (line.account_code) {
+    const acc = await repo.getAccountByCode({
+      client,
+      brand,
+      code: line.account_code,
+    });
+    if (!acc)
+      throw new AppError(
+        "ACCOUNT_NOT_FOUND",
+        `No postable account for code ${line.account_code}`,
+        409,
+      );
+    return acc.account_id;
+  }
+  throw new AppError(
+    "ACCOUNT_REQUIRED",
+    "Each journal line needs account_id or account_code",
+    400,
+  );
 }
 
-async function getById({ brand, user, scope, id }) {
-  const item = await repo.findById({ brand, id, scope, user_id: user.user_id });
-  if (!item) throw new NotFoundError("Accounting");
-  return item;
+/**
+ * Post a balanced journal entry. Accepts an optional `client` so callers can
+ * post inside their own transaction (atomic with the source record).
+ */
+async function postEntry({ client, brand, entry, lines, user_id }) {
+  const run = async (c) => {
+    if (!Array.isArray(lines) || lines.length < 2) {
+      throw new AppError(
+        "INVALID_JOURNAL",
+        "A journal entry needs at least two lines",
+        400,
+      );
+    }
+    let dr = money(0),
+      cr = money(0);
+    const resolved = [];
+    for (const [idx, line] of lines.entries()) {
+      const account_id = await resolveAccountId({ client: c, brand, line });
+      const debit = money(line.debit_ngn || 0);
+      const credit = money(line.credit_ngn || 0);
+      dr = dr.plus(debit);
+      cr = cr.plus(credit);
+      resolved.push({
+        ...line,
+        account_id,
+        debit_ngn: toCurrencyString(debit),
+        credit_ngn: toCurrencyString(credit),
+        display_order: idx,
+      });
+    }
+    if (dr.minus(cr).abs().gt(money("0.01"))) {
+      throw new AppError(
+        "JOURNAL_UNBALANCED",
+        `Debits (${toCurrencyString(dr)}) != credits (${toCurrencyString(cr)})`,
+        409,
+      );
+    }
+
+    const posting_date =
+      entry.posting_date || new Date().toISOString().slice(0, 10);
+    const period = await repo.findActivePeriod({
+      client: c,
+      brand,
+      date: posting_date,
+    });
+    if (!period)
+      throw new AppError(
+        "NO_OPEN_PERIOD",
+        `No open fiscal period for ${posting_date}`,
+        409,
+      );
+
+    const entry_number = await repo.nextEntryNumber({ client: c, brand });
+    const created = await repo.insertEntry({
+      client: c,
+      brand,
+      entry: {
+        entry_number,
+        source_type: entry.source_type,
+        source_table: entry.source_table,
+        source_id: entry.source_id,
+        fiscal_period_id: period.period_id,
+        posting_date,
+        transaction_currency: entry.transaction_currency,
+        fx_rate_used: entry.fx_rate_used,
+        description: entry.description,
+        reference: entry.reference,
+      },
+    });
+    for (const line of resolved)
+      await repo.insertLine({
+        client: c,
+        brand,
+        line: { ...line, entry_id: created.entry_id },
+      });
+    const posted = await repo.setEntryStatus({
+      client: c,
+      brand,
+      id: created.entry_id,
+      status: "posted",
+      user_id,
+    });
+    await audit({
+      business: brand,
+      user_id,
+      action_key: "accounting.journal.post",
+      target_type: "journal_entry",
+      target_id: created.entry_id,
+      after: { entry_number, total: toCurrencyString(dr) },
+    });
+    events.emit("journal.posted", {
+      brand,
+      entry_id: created.entry_id,
+      source_type: entry.source_type,
+    });
+    return repo.findEntryById({ client: c, brand, id: created.entry_id });
+  };
+  return client ? run(client) : transaction(run);
 }
 
-async function create({ brand, user, request_id, input }) {
+async function reverseEntry({ brand, user, request_id, id, reason }) {
   return transaction(async (client) => {
-    const created = await repo.create({
+    const original = await repo.findEntryById({ client, brand, id });
+    if (!original) throw new NotFoundError("Journal entry");
+    if (original.status !== "posted")
+      throw new AppError(
+        "INVALID_STATE",
+        `Cannot reverse a ${original.status} entry`,
+        409,
+      );
+    const reversal = await postEntry({
       client,
       brand,
       user_id: user.user_id,
-      input,
+      entry: {
+        source_type: "reversal",
+        source_table: "journal_entries",
+        source_id: id,
+        description: `Reversal of ${original.entry_number}: ${reason || ""}`,
+        reference: original.entry_number,
+        posting_date: new Date().toISOString().slice(0, 10),
+      },
+      lines: original.lines.map((l) => ({
+        account_id: l.account_id,
+        debit_ngn: l.credit_ngn,
+        credit_ngn: l.debit_ngn,
+        contact_id: l.contact_id,
+      })),
+    });
+    await repo.setEntryReversed({
+      client,
+      brand,
+      id,
+      reversal_entry_id: reversal.entry_id,
     });
     await audit({
       business: brand,
       user_id: user.user_id,
-      action_key: "accounting.create",
-      target_type: "accounting",
-      target_id: created.id || created[Object.keys(created)[0]],
-      after: created,
-      request_id,
-    });
-    events.emit("created", { brand, item: created, user_id: user.user_id });
-    return created;
-  });
-}
-
-async function update({ brand, user, request_id, id, patch }) {
-  return transaction(async (client) => {
-    const before = await repo.findById({ client, brand, id });
-    if (!before) throw new NotFoundError("Accounting");
-    const updated = await repo.update({ client, brand, id, patch });
-    await audit({
-      business: brand,
-      user_id: user.user_id,
-      action_key: "accounting.update",
-      target_type: "accounting",
+      action_key: "accounting.journal.reverse",
+      target_type: "journal_entry",
       target_id: id,
-      before,
-      after: updated,
+      after: { reversal_entry_id: reversal.entry_id },
       request_id,
     });
-    events.emit("updated", { brand, item: updated, user_id: user.user_id });
-    return updated;
+    return reversal;
   });
 }
 
-async function archive({ brand, user, request_id, id }) {
-  return transaction(async (client) => {
-    const before = await repo.findById({ client, brand, id });
-    if (!before) throw new NotFoundError("Accounting");
-    await repo.archive({ client, brand, id });
-    await audit({
-      business: brand,
-      user_id: user.user_id,
-      action_key: "accounting.archive",
-      target_type: "accounting",
-      target_id: id,
-      before,
-      request_id,
-    });
-    events.emit("archived", { brand, id, user_id: user.user_id });
+// Manual journal (controller-driven)
+async function createManualJournal({ brand, user, request_id, input }) {
+  const entry = await postEntry({
+    brand,
+    user_id: user.user_id,
+    entry: {
+      source_type: "manual",
+      description: input.description,
+      reference: input.reference,
+      posting_date: input.posting_date,
+    },
+    lines: input.lines,
   });
+  void request_id;
+  return entry;
 }
 
-module.exports = { list, getById, create, update, archive };
+// ── Reads + COA / periods management ─────────────────────
+const listGroups = ({ brand }) => repo.listGroups({ brand });
+const updateGroup = ({ brand, id, input }) =>
+  repo.updateGroup({ brand, id, patch: input });
+const listAccounts = ({ brand, filters }) =>
+  repo.listAccounts({ brand, filters });
+async function getAccount({ brand, id }) {
+  const a = await repo.getAccount({ brand, id });
+  if (!a) throw new NotFoundError("Account");
+  return a;
+}
+async function createAccount({ brand, user, request_id, input }) {
+  const a = await repo.createAccount({ brand, input });
+  await audit({
+    business: brand,
+    user_id: user.user_id,
+    action_key: "accounting.account.create",
+    target_type: "chart_of_accounts",
+    target_id: a.account_id,
+    after: a,
+    request_id,
+  });
+  return a;
+}
+async function updateAccount({ brand, user, request_id, id, patch }) {
+  const a = await repo.updateAccount({ brand, id, patch });
+  if (!a) throw new NotFoundError("Account");
+  await audit({
+    business: brand,
+    user_id: user.user_id,
+    action_key: "accounting.account.update",
+    target_type: "chart_of_accounts",
+    target_id: id,
+    after: a,
+    request_id,
+  });
+  return a;
+}
+const listPeriods = ({ brand }) => repo.listPeriods({ brand });
+async function createPeriod({ brand, user, request_id, input }) {
+  const p = await repo.createPeriod({ brand, input });
+  await audit({
+    business: brand,
+    user_id: user.user_id,
+    action_key: "accounting.period.create",
+    target_type: "fiscal_period",
+    target_id: p.period_id,
+    after: p,
+    request_id,
+  });
+  return p;
+}
+async function closePeriod({ brand, user, request_id, id }) {
+  const p = await repo.closePeriod({ brand, id, user_id: user.user_id });
+  if (!p) throw new NotFoundError("Period");
+  await audit({
+    business: brand,
+    user_id: user.user_id,
+    action_key: "accounting.period.close",
+    target_type: "fiscal_period",
+    target_id: id,
+    after: { status: "closed" },
+    request_id,
+  });
+  return p;
+}
+function listJournals({ brand, filters, page, page_size }) {
+  const offset = (page - 1) * page_size;
+  return repo.listEntries({ brand, filters, page, page_size, offset });
+}
+async function getJournal({ brand, id }) {
+  const e = await repo.findEntryById({ brand, id });
+  if (!e) throw new NotFoundError("Journal entry");
+  return e;
+}
+
+// ── Financial reports (V2.2 §6.6) ────────────────────────
+function rowBalance(r) {
+  const debit = money(r.debit_ngn);
+  const credit = money(r.credit_ngn);
+  return r.normal_balance === "debit"
+    ? debit.minus(credit)
+    : credit.minus(debit);
+}
+
+async function trialBalance({ brand, as_of }) {
+  const rows = await repo.accountActivity({ brand, to: as_of || null });
+  let totalDebit = money(0),
+    totalCredit = money(0);
+  const accounts = rows.map((r) => {
+    const debit = money(r.debit_ngn),
+      credit = money(r.credit_ngn);
+    totalDebit = totalDebit.plus(debit);
+    totalCredit = totalCredit.plus(credit);
+    return {
+      account_code: r.account_code,
+      account_name: r.account_name,
+      group_type: r.group_type,
+      debit_ngn: toCurrencyString(debit),
+      credit_ngn: toCurrencyString(credit),
+    };
+  });
+  return {
+    as_of: as_of || new Date().toISOString().slice(0, 10),
+    accounts,
+    total_debit_ngn: toCurrencyString(totalDebit),
+    total_credit_ngn: toCurrencyString(totalCredit),
+    balanced: totalDebit.minus(totalCredit).abs().lte(money("0.01")),
+  };
+}
+
+async function profitAndLoss({ brand, from, to }) {
+  const rows = await repo.accountActivity({ brand, from, to });
+  const revenue = [],
+    expenses = [];
+  let revTotal = money(0),
+    expTotal = money(0);
+  for (const r of rows) {
+    if (r.statement !== "income_statement") continue;
+    const bal = rowBalance(r);
+    const item = {
+      account_code: r.account_code,
+      account_name: r.account_name,
+      amount_ngn: toCurrencyString(bal),
+    };
+    if (["revenue", "contra_revenue"].includes(r.group_type)) {
+      revenue.push(item);
+      revTotal = revTotal.plus(bal);
+    } else if (r.group_type === "expense") {
+      expenses.push(item);
+      expTotal = expTotal.plus(bal);
+    }
+  }
+  return {
+    period: { from, to },
+    revenue,
+    total_revenue_ngn: toCurrencyString(revTotal),
+    expenses,
+    total_expenses_ngn: toCurrencyString(expTotal),
+    net_profit_ngn: toCurrencyString(revTotal.minus(expTotal)),
+  };
+}
+
+async function balanceSheet({ brand, as_of }) {
+  const rows = await repo.accountActivity({ brand, to: as_of || null });
+  const assets = [],
+    liabilities = [],
+    equity = [];
+  let aT = money(0),
+    lT = money(0),
+    eT = money(0);
+  for (const r of rows) {
+    if (r.statement !== "balance_sheet") continue;
+    const bal = rowBalance(r);
+    const item = {
+      account_code: r.account_code,
+      account_name: r.account_name,
+      amount_ngn: toCurrencyString(bal),
+    };
+    if (["asset", "contra_asset"].includes(r.group_type)) {
+      assets.push(item);
+      aT = aT.plus(bal);
+    } else if (r.group_type === "liability") {
+      liabilities.push(item);
+      lT = lT.plus(bal);
+    } else if (r.group_type === "equity") {
+      equity.push(item);
+      eT = eT.plus(bal);
+    }
+  }
+  return {
+    as_of: as_of || new Date().toISOString().slice(0, 10),
+    assets,
+    total_assets_ngn: toCurrencyString(aT),
+    liabilities,
+    total_liabilities_ngn: toCurrencyString(lT),
+    equity,
+    total_equity_ngn: toCurrencyString(eT),
+    balanced: aT.minus(lT.plus(eT)).abs().lte(money("0.01")),
+  };
+}
+
+module.exports = {
+  postEntry,
+  reverseEntry,
+  createManualJournal,
+  listGroups,
+  updateGroup,
+  listAccounts,
+  getAccount,
+  createAccount,
+  updateAccount,
+  listPeriods,
+  createPeriod,
+  closePeriod,
+  listJournals,
+  getJournal,
+  trialBalance,
+  profitAndLoss,
+  balanceSheet,
+};

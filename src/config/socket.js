@@ -53,6 +53,9 @@ async function initSocketIo(httpServer) {
   const { registerCampaignRealtime } = require("../realtime/campaign-realtime");
   registerCampaignRealtime();
 
+  const { registerWorkflowRealtime } = require("../realtime/workflow-realtime");
+  registerWorkflowRealtime();
+
   logger.info("socket.io initialised with redis adapter");
   return io;
 }

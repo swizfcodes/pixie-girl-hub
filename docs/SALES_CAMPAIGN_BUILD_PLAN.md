@@ -12,7 +12,7 @@ All phases (0 → 6) are implemented and tested. The full API contract is in `do
 
 **Files written/changed:**
 
-- Migrations: `template/000019` (added `pending_approval` status); `000102_shared_sales_campaign_permissions.sql` (RBAC approve/delete/export). *(The `sales_campaign_metrics` table already exists in `000019` — no new migration needed.)*
+- Migrations: `template/000019` (added `pending_approval` status); `000102_shared_sales_campaign_permissions.sql` (RBAC approve/delete/export). _(The `sales_campaign_metrics` table already exists in `000019` — no new migration needed.)_
 - Two missing middleware repos created (the app couldn't boot without them): `org_workflow/permissions.repo.js`, `business_setup/business-config.repo.js`.
 - Workflow engine implemented: `src/workflows/engine.js` (was a TODO stub) — self-bootstraps a `campaign_approval` definition.
 - Campaign module (`src/modules/sales_campaigns/`): `campaigns.repo / service / controller / routes / validator` (real), plus new `campaigns.public.* `, `campaigns.discount.service`, `campaigns.analytics.service`, `campaigns.notifications.service`.
@@ -148,52 +148,52 @@ All admin routes: `Authorization: Bearer <jwt>` + `X-Brand-Context: pixiegirl|fa
 
 ### 5.1 Admin — campaign lifecycle (`/api/v1/sales-campaigns`)
 
-| Method | Route | Permission | Purpose |
-| --- | --- | --- | --- |
-| GET | `/` | `view` | List (filters: `status`, `q`, `active_on`, date range; paginated) |
-| POST | `/` | `create` | Create a draft campaign |
-| GET | `/:id` | `view` | Detail (campaign + products + signup count + current rollups) |
-| PATCH | `/:id` | `edit` | Update (only in `draft`/`scheduled`/`paused`) |
-| DELETE | `/:id` | `delete` | Archive (soft; `status='archived'`) |
-| POST | `/:id/submit` | `edit` | Submit for approval → opens workflow |
-| POST | `/:id/approve` | `approve` | Approve (manager/CEO); sets `approved_by/at` → `scheduled` |
-| POST | `/:id/reject` | `approve` | Reject → back to `draft` with notes |
-| POST | `/:id/launch` | `edit` | Manual go-live now (`scheduled`/`paused` → `live`) |
-| POST | `/:id/pause` | `edit` | Pause a live campaign |
-| POST | `/:id/resume` | `edit` | Resume a paused campaign |
-| POST | `/:id/end` | `edit` | End early (`live` → `ended`) |
-| POST | `/:id/duplicate` | `create` | Clone config into a new draft |
+| Method | Route            | Permission | Purpose                                                           |
+| ------ | ---------------- | ---------- | ----------------------------------------------------------------- |
+| GET    | `/`              | `view`     | List (filters: `status`, `q`, `active_on`, date range; paginated) |
+| POST   | `/`              | `create`   | Create a draft campaign                                           |
+| GET    | `/:id`           | `view`     | Detail (campaign + products + signup count + current rollups)     |
+| PATCH  | `/:id`           | `edit`     | Update (only in `draft`/`scheduled`/`paused`)                     |
+| DELETE | `/:id`           | `delete`   | Archive (soft; `status='archived'`)                               |
+| POST   | `/:id/submit`    | `edit`     | Submit for approval → opens workflow                              |
+| POST   | `/:id/approve`   | `approve`  | Approve (manager/CEO); sets `approved_by/at` → `scheduled`        |
+| POST   | `/:id/reject`    | `approve`  | Reject → back to `draft` with notes                               |
+| POST   | `/:id/launch`    | `edit`     | Manual go-live now (`scheduled`/`paused` → `live`)                |
+| POST   | `/:id/pause`     | `edit`     | Pause a live campaign                                             |
+| POST   | `/:id/resume`    | `edit`     | Resume a paused campaign                                          |
+| POST   | `/:id/end`       | `edit`     | End early (`live` → `ended`)                                      |
+| POST   | `/:id/duplicate` | `create`   | Clone config into a new draft                                     |
 
 ### 5.2 Admin — products & landing & sharing
 
-| Method | Route | Permission | Purpose |
-| --- | --- | --- | --- |
-| GET | `/:id/products` | `view` | Included/excluded products + categories |
-| POST | `/:id/products` | `edit` | Add include/exclude (product or category, price override, featured) |
-| PATCH | `/:id/products/:linkId` | `edit` | Update override/featured/order |
-| DELETE | `/:id/products/:linkId` | `edit` | Remove link |
-| GET | `/:id/landing` | `view` | Landing config (hero, blocks, SEO, state messages) |
-| PATCH | `/:id/landing` | `edit` | Update landing config (draft/publish bar) |
-| GET | `/:id/preview?state=before\|live\|ended` | `view` | Rendered landing payload for any state (admin preview) |
-| GET | `/:id/share-kit` | `view` | Pre-formatted IG/WhatsApp/email copy + UTM-tagged URLs |
+| Method | Route                                    | Permission | Purpose                                                             |
+| ------ | ---------------------------------------- | ---------- | ------------------------------------------------------------------- |
+| GET    | `/:id/products`                          | `view`     | Included/excluded products + categories                             |
+| POST   | `/:id/products`                          | `edit`     | Add include/exclude (product or category, price override, featured) |
+| PATCH  | `/:id/products/:linkId`                  | `edit`     | Update override/featured/order                                      |
+| DELETE | `/:id/products/:linkId`                  | `edit`     | Remove link                                                         |
+| GET    | `/:id/landing`                           | `view`     | Landing config (hero, blocks, SEO, state messages)                  |
+| PATCH  | `/:id/landing`                           | `edit`     | Update landing config (draft/publish bar)                           |
+| GET    | `/:id/preview?state=before\|live\|ended` | `view`     | Rendered landing payload for any state (admin preview)              |
+| GET    | `/:id/share-kit`                         | `view`     | Pre-formatted IG/WhatsApp/email copy + UTM-tagged URLs              |
 
 ### 5.3 Admin — signups & analytics
 
-| Method | Route | Permission | Purpose |
-| --- | --- | --- | --- |
-| GET | `/:id/signups` | `view` | Pre-launch notification list (paginated) |
-| GET | `/:id/signups/export` | `export` | CSV export of signups |
-| GET | `/:id/metrics` | `view` | Current rollups + live snapshot (powers revenue ticker) |
-| GET | `/:id/metrics/daily?from=&to=` | `view` | Daily snapshot series (chart) |
-| GET | `/:id/report` | `view`/`export` | Post-campaign report (JSON; `?format=pdf` for PDF) |
+| Method | Route                          | Permission      | Purpose                                                 |
+| ------ | ------------------------------ | --------------- | ------------------------------------------------------- |
+| GET    | `/:id/signups`                 | `view`          | Pre-launch notification list (paginated)                |
+| GET    | `/:id/signups/export`          | `export`        | CSV export of signups                                   |
+| GET    | `/:id/metrics`                 | `view`          | Current rollups + live snapshot (powers revenue ticker) |
+| GET    | `/:id/metrics/daily?from=&to=` | `view`          | Daily snapshot series (chart)                           |
+| GET    | `/:id/report`                  | `view`/`export` | Post-campaign report (JSON; `?format=pdf` for PDF)      |
 
 ### 5.4 Public — landing page (`/api/public/sale`, no auth)
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| GET | `/:slug` | Landing payload: resolved state, hero/blocks, countdown target, products with `original_price`/`campaign_price` + live stock counters, SEO/OG tags. `before`→signup CTA; `ended`→`ended_redirect_to`. |
-| GET | `/:slug/stock` | Lightweight live stock counters (poll fallback for the socket room) |
-| POST | `/:slug/signup` | Capture pre-launch notification signup (`email`/`phone`, `notify_via`); rate-limited; links to existing `shared.contacts` if matched |
+| Method | Route           | Purpose                                                                                                                                                                                               |
+| ------ | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/:slug`        | Landing payload: resolved state, hero/blocks, countdown target, products with `original_price`/`campaign_price` + live stock counters, SEO/OG tags. `before`→signup CTA; `ended`→`ended_redirect_to`. |
+| GET    | `/:slug/stock`  | Lightweight live stock counters (poll fallback for the socket room)                                                                                                                                   |
+| POST   | `/:slug/signup` | Capture pre-launch notification signup (`email`/`phone`, `notify_via`); rate-limited; links to existing `shared.contacts` if matched                                                                  |
 
 > **Checkout** reuses the existing public order form / storefront cart; the client passes the campaign `slug` (or it is derived from `utm_campaign`). The server validates eligibility and applies the discount via `campaigns.discount.service` — see §6. The discount is never trusted from the client.
 
@@ -312,16 +312,16 @@ Schemas in `campaigns.validator.js`: `create` (name, unique slug pattern `^[a-z0
 
 ## 12. Build sequence (phased — each phase ends with callable endpoints)
 
-| Phase | Deliverable | Frontend can... |
-| --- | --- | --- |
-| **0 — Schema & fix** | Metrics migration, `pending_approval` status migration (#1), perms seed, fix repo PK/columns, optional stock trigger | — |
-| **0b — Workflow engine** | Implement `workflows/engine.js` (`openInstance`/`act`/`resolveApprover`) + `workflow_definitions` schema seed (#3) — shared dependency | Pending-approvals queue endpoints |
-| **1 — Admin CRUD + state machine** | Real repo/service/validator; list/create/detail/update/archive; submit/approve/launch/pause/resume/end; products sub-resource; landing config | Build campaign list + builder wizard + landing editor |
-| **2 — Public landing** | `GET /sale/:slug` (3-state resolver), `/stock`, `POST /signup`, share-kit/UTM | Build the public `/sale/{slug}` page (before/live/ended) |
-| **3 — Discount engine** | `discount.service` + checkout wiring (sales/pos/storefront) + usage caps + attribution + stock deduction | Apply campaign pricing at checkout |
-| **4 — Analytics** | Funnel aggregation, daily snapshots, `/metrics` + `/metrics/daily`, socket room | Build the live dashboard + revenue ticker |
-| **5 — Notifications** | Go-live blast (Smartcomm+email), pre/post email automation, post-campaign **PDF** report (#4) | Show signup counts, report screen + PDF download |
-| **6 — Hardening** | RBAC seeds applied, workflow approval gate, audit coverage, unit/integration tests, OpenAPI spec entries, action-catalogue rows for Praxis | Stable, documented contract |
+| Phase                              | Deliverable                                                                                                                                   | Frontend can...                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| **0 — Schema & fix**               | Metrics migration, `pending_approval` status migration (#1), perms seed, fix repo PK/columns, optional stock trigger                          | —                                                        |
+| **0b — Workflow engine**           | Implement `workflows/engine.js` (`openInstance`/`act`/`resolveApprover`) + `workflow_definitions` schema seed (#3) — shared dependency        | Pending-approvals queue endpoints                        |
+| **1 — Admin CRUD + state machine** | Real repo/service/validator; list/create/detail/update/archive; submit/approve/launch/pause/resume/end; products sub-resource; landing config | Build campaign list + builder wizard + landing editor    |
+| **2 — Public landing**             | `GET /sale/:slug` (3-state resolver), `/stock`, `POST /signup`, share-kit/UTM                                                                 | Build the public `/sale/{slug}` page (before/live/ended) |
+| **3 — Discount engine**            | `discount.service` + checkout wiring (sales/pos/storefront) + usage caps + attribution + stock deduction                                      | Apply campaign pricing at checkout                       |
+| **4 — Analytics**                  | Funnel aggregation, daily snapshots, `/metrics` + `/metrics/daily`, socket room                                                               | Build the live dashboard + revenue ticker                |
+| **5 — Notifications**              | Go-live blast (Smartcomm+email), pre/post email automation, post-campaign **PDF** report (#4)                                                 | Show signup counts, report screen + PDF download         |
+| **6 — Hardening**                  | RBAC seeds applied, workflow approval gate, audit coverage, unit/integration tests, OpenAPI spec entries, action-catalogue rows for Praxis    | Stable, documented contract                              |
 
 **Critical-path dependency:** Phase 1's `approve` path needs the workflow engine, so **Phase 0b builds the real `workflows/engine.js` before Phase 1** (locked decision #3). This front-loads shared infrastructure but unblocks Expenses, Purchasing, Pricing, Stylist, HR, and Cash Request too.
 

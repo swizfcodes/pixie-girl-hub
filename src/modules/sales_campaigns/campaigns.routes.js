@@ -27,14 +27,22 @@ router.post(
 );
 
 // ── Single campaign ────────────────────────────────────────
-router.get("/:id", requirePermission("sales_campaigns", "view"), controller.getById);
+router.get(
+  "/:id",
+  requirePermission("sales_campaigns", "view"),
+  controller.getById,
+);
 router.patch(
   "/:id",
   requirePermission("sales_campaigns", "edit"),
   validator.validateUpdate,
   controller.update,
 );
-router.delete("/:id", requirePermission("sales_campaigns", "delete"), controller.archive);
+router.delete(
+  "/:id",
+  requirePermission("sales_campaigns", "delete"),
+  controller.archive,
+);
 
 // ── Lifecycle transitions ──────────────────────────────────
 router.post(
@@ -55,10 +63,26 @@ router.post(
   validator.validateTransition,
   controller.reject,
 );
-router.post("/:id/launch", requirePermission("sales_campaigns", "edit"), controller.launch);
-router.post("/:id/pause", requirePermission("sales_campaigns", "edit"), controller.pause);
-router.post("/:id/resume", requirePermission("sales_campaigns", "edit"), controller.resume);
-router.post("/:id/end", requirePermission("sales_campaigns", "edit"), controller.end);
+router.post(
+  "/:id/launch",
+  requirePermission("sales_campaigns", "edit"),
+  controller.launch,
+);
+router.post(
+  "/:id/pause",
+  requirePermission("sales_campaigns", "edit"),
+  controller.pause,
+);
+router.post(
+  "/:id/resume",
+  requirePermission("sales_campaigns", "edit"),
+  controller.resume,
+);
+router.post(
+  "/:id/end",
+  requirePermission("sales_campaigns", "edit"),
+  controller.end,
+);
 router.post(
   "/:id/duplicate",
   requirePermission("sales_campaigns", "create"),

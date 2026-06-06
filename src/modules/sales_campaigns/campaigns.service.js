@@ -16,7 +16,11 @@ const wf = require("../../workflows/engine");
 const { audit } = require("../../middleware/audit");
 const { transaction } = require("../../config/database");
 const { config } = require("../../config/env");
-const { NotFoundError, AppError, ConflictError } = require("../../utils/errors");
+const {
+  NotFoundError,
+  AppError,
+  ConflictError,
+} = require("../../utils/errors");
 
 const REFERENCE_TABLE = "sales_campaigns";
 
@@ -32,7 +36,8 @@ function assertStatus(campaign, allowed, action) {
 
 /** Pure resolver of the public landing phase. */
 function resolveState(campaign, now = new Date()) {
-  if (campaign.status === "ended" || campaign.status === "archived") return "ended";
+  if (campaign.status === "ended" || campaign.status === "archived")
+    return "ended";
   const starts = new Date(campaign.starts_at);
   const ends = new Date(campaign.ends_at);
   if (now < starts) return "before";
@@ -45,7 +50,15 @@ function resolveState(campaign, now = new Date()) {
 
 async function list({ brand, user, scope, filters, page, page_size }) {
   const offset = (page - 1) * page_size;
-  return repo.findAll({ brand, scope, user_id: user.user_id, filters, page, page_size, offset });
+  return repo.findAll({
+    brand,
+    scope,
+    user_id: user.user_id,
+    filters,
+    page,
+    page_size,
+    offset,
+  });
 }
 
 async function getById({ brand, scope, user, id }) {
@@ -63,9 +76,15 @@ async function getById({ brand, scope, user, id }) {
 async function create({ brand, user, request_id, input }) {
   return transaction(async (client) => {
     const existing = await repo.findBySlug({ client, brand, slug: input.slug });
-    if (existing) throw new ConflictError(`Slug '${input.slug}' is already in use`);
+    if (existing)
+      throw new ConflictError(`Slug '${input.slug}' is already in use`);
 
-    const created = await repo.create({ client, brand, input, user_id: user.user_id });
+    const created = await repo.create({
+      client,
+      brand,
+      input,
+      user_id: user.user_id,
+    });
     await audit({
       business: brand,
       user_id: user.user_id,
@@ -75,7 +94,11 @@ async function create({ brand, user, request_id, input }) {
       after: created,
       request_id,
     });
-    events.emit("created", { brand, id: created.campaign_id, user_id: user.user_id });
+    events.emit("created", {
+      brand,
+      id: created.campaign_id,
+      user_id: user.user_id,
+    });
     return created;
   });
 }
@@ -84,11 +107,16 @@ async function update({ brand, user, request_id, id, patch }) {
   return transaction(async (client) => {
     const before = await repo.findById({ client, brand, id });
     if (!before) throw new NotFoundError("Campaign");
-    assertStatus(before, ["draft", "pending_approval", "scheduled", "paused"], "edit");
+    assertStatus(
+      before,
+      ["draft", "pending_approval", "scheduled", "paused"],
+      "edit",
+    );
 
     if (patch.slug && patch.slug !== before.slug) {
       const clash = await repo.findBySlug({ client, brand, slug: patch.slug });
-      if (clash) throw new ConflictError(`Slug '${patch.slug}' is already in use`);
+      if (clash)
+        throw new ConflictError(`Slug '${patch.slug}' is already in use`);
     }
 
     const updated = await repo.update({ client, brand, id, patch });
@@ -118,7 +146,12 @@ async function archive({ brand, user, request_id, id }) {
         409,
       );
     }
-    const updated = await repo.setStatus({ client, brand, id, status: "archived" });
+    const updated = await repo.setStatus({
+      client,
+      brand,
+      id,
+      status: "archived",
+    });
     await audit({
       business: brand,
       user_id: user.user_id,
@@ -142,7 +175,11 @@ async function submit({ brand, user, request_id, id }) {
     assertStatus(campaign, ["draft"], "submit");
 
     if (campaign.product_scope !== "all") {
-      const products = await repo.listProducts({ client, brand, campaign_id: id });
+      const products = await repo.listProducts({
+        client,
+        brand,
+        campaign_id: id,
+      });
       const hasInclude = products.some((p) => p.include_exclude === "include");
       if (!hasInclude) {
         throw new AppError(
@@ -153,7 +190,12 @@ async function submit({ brand, user, request_id, id }) {
       }
     }
 
-    const updated = await repo.setStatus({ client, brand, id, status: "pending_approval" });
+    const updated = await repo.setStatus({
+      client,
+      brand,
+      id,
+      status: "pending_approval",
+    });
     const instance = await wf.openInstance({
       client,
       business: brand,
@@ -175,7 +217,10 @@ async function submit({ brand, user, request_id, id }) {
       action_key: "sales_campaigns.submit",
       target_type: REFERENCE_TABLE,
       target_id: id,
-      after: { status: "pending_approval", workflow_instance_id: instance.instance_id },
+      after: {
+        status: "pending_approval",
+        workflow_instance_id: instance.instance_id,
+      },
       request_id,
     });
     events.emit("submitted", { brand, id, instance_id: instance.instance_id });
@@ -195,7 +240,8 @@ async function approve({ brand, user, request_id, id, notes }) {
       reference_table: REFERENCE_TABLE,
       reference_id: id,
     });
-    if (!instance) throw new AppError("NO_PENDING_APPROVAL", "No open approval found", 409);
+    if (!instance)
+      throw new AppError("NO_PENDING_APPROVAL", "No open approval found", 409);
 
     const result = await wf.act({
       client,
@@ -221,7 +267,10 @@ async function approve({ brand, user, request_id, id, notes }) {
       action_key: "sales_campaigns.approve",
       target_type: REFERENCE_TABLE,
       target_id: id,
-      after: { workflow_status: result.status, campaign_status: updated.status },
+      after: {
+        workflow_status: result.status,
+        campaign_status: updated.status,
+      },
       request_id,
     });
     events.emit("approved", { brand, id, workflow_status: result.status });
@@ -242,9 +291,20 @@ async function reject({ brand, user, request_id, id, notes }) {
       reference_id: id,
     });
     if (instance) {
-      await wf.act({ client, instance_id: instance.instance_id, user, action: "reject", notes });
+      await wf.act({
+        client,
+        instance_id: instance.instance_id,
+        user,
+        action: "reject",
+        notes,
+      });
     }
-    const updated = await repo.setStatus({ client, brand, id, status: "draft" });
+    const updated = await repo.setStatus({
+      client,
+      brand,
+      id,
+      status: "draft",
+    });
     await audit({
       business: brand,
       user_id: user.user_id,
@@ -261,22 +321,36 @@ async function reject({ brand, user, request_id, id, notes }) {
 
 async function transition({ brand, user, request_id, id, action }) {
   const MAP = {
-    launch: { from: ["scheduled", "paused"], to: "live", requireApproved: true },
+    launch: {
+      from: ["scheduled", "paused"],
+      to: "live",
+      requireApproved: true,
+    },
     pause: { from: ["live"], to: "paused" },
     resume: { from: ["paused"], to: "live" },
     end: { from: ["live", "paused"], to: "ended" },
   };
   const rule = MAP[action];
-  if (!rule) throw new AppError("INVALID_ACTION", `Unknown transition ${action}`, 400);
+  if (!rule)
+    throw new AppError("INVALID_ACTION", `Unknown transition ${action}`, 400);
 
   return transaction(async (client) => {
     const campaign = await repo.findById({ client, brand, id });
     if (!campaign) throw new NotFoundError("Campaign");
     assertStatus(campaign, rule.from, action);
     if (rule.requireApproved && !campaign.approved_at) {
-      throw new AppError("NOT_APPROVED", "Campaign must be approved before launch", 409);
+      throw new AppError(
+        "NOT_APPROVED",
+        "Campaign must be approved before launch",
+        409,
+      );
     }
-    const updated = await repo.setStatus({ client, brand, id, status: rule.to });
+    const updated = await repo.setStatus({
+      client,
+      brand,
+      id,
+      status: rule.to,
+    });
     await audit({
       business: brand,
       user_id: user.user_id,
@@ -297,7 +371,8 @@ async function duplicate({ brand, user, request_id, id, overrides = {} }) {
     const src = await repo.findById({ client, brand, id });
     if (!src) throw new NotFoundError("Campaign");
 
-    const newSlug = overrides.slug || `${src.slug}-copy-${Date.now().toString(36)}`;
+    const newSlug =
+      overrides.slug || `${src.slug}-copy-${Date.now().toString(36)}`;
     const clash = await repo.findBySlug({ client, brand, slug: newSlug });
     if (clash) throw new ConflictError(`Slug '${newSlug}' is already in use`);
 
@@ -327,9 +402,18 @@ async function duplicate({ brand, user, request_id, id, overrides = {} }) {
       og_image_url: src.og_image_url,
       total_usage_limit: src.total_usage_limit,
     };
-    const created = await repo.create({ client, brand, input, user_id: user.user_id });
+    const created = await repo.create({
+      client,
+      brand,
+      input,
+      user_id: user.user_id,
+    });
 
-    const products = await repo.listProducts({ client, brand, campaign_id: id });
+    const products = await repo.listProducts({
+      client,
+      brand,
+      campaign_id: id,
+    });
     for (const p of products) {
       await repo.addProduct({
         client,
@@ -354,7 +438,11 @@ async function duplicate({ brand, user, request_id, id, overrides = {} }) {
       after: { source: id },
       request_id,
     });
-    events.emit("created", { brand, id: created.campaign_id, user_id: user.user_id });
+    events.emit("created", {
+      brand,
+      id: created.campaign_id,
+      user_id: user.user_id,
+    });
     return created;
   });
 }
@@ -370,8 +458,17 @@ async function addProduct({ brand, user, request_id, id, input }) {
   return transaction(async (client) => {
     const campaign = await repo.findById({ client, brand, id });
     if (!campaign) throw new NotFoundError("Campaign");
-    assertStatus(campaign, ["draft", "pending_approval", "scheduled", "paused"], "edit products of");
-    const link = await repo.addProduct({ client, brand, campaign_id: id, input });
+    assertStatus(
+      campaign,
+      ["draft", "pending_approval", "scheduled", "paused"],
+      "edit products of",
+    );
+    const link = await repo.addProduct({
+      client,
+      brand,
+      campaign_id: id,
+      input,
+    });
     events.emit("updated", { brand, id });
     await audit({
       business: brand,
@@ -389,7 +486,12 @@ async function addProduct({ brand, user, request_id, id, input }) {
 async function updateProduct({ brand, user, request_id, id, link_id, patch }) {
   const link = await repo.findProductLink({ brand, campaign_id: id, link_id });
   if (!link) throw new NotFoundError("Campaign product");
-  const updated = await repo.updateProduct({ brand, campaign_id: id, link_id, patch });
+  const updated = await repo.updateProduct({
+    brand,
+    campaign_id: id,
+    link_id,
+    patch,
+  });
   events.emit("updated", { brand, id });
   await audit({
     business: brand,
@@ -460,7 +562,8 @@ function buildLandingPayload(c, products, state) {
       image_url: c.landing_hero_image_url,
       cta_text: c.landing_cta_text,
     },
-    countdown_to: state === "before" ? c.starts_at : state === "live" ? c.ends_at : null,
+    countdown_to:
+      state === "before" ? c.starts_at : state === "live" ? c.ends_at : null,
     countdown_message: c.countdown_message,
     signup_for_notifications: state === "before" && c.signup_for_notifications,
     blocks: c.landing_blocks || [],
@@ -477,12 +580,19 @@ function buildLandingPayload(c, products, state) {
               stock_remaining: p.current_stock_snapshot,
             }))
         : [],
-    ended: state === "ended" ? { message: c.ended_message, redirect_to: c.ended_redirect_to } : null,
-    seo: { meta_title: c.meta_title, meta_description: c.meta_description, og_image_url: c.og_image_url },
+    ended:
+      state === "ended"
+        ? { message: c.ended_message, redirect_to: c.ended_redirect_to }
+        : null,
+    seo: {
+      meta_title: c.meta_title,
+      meta_description: c.meta_description,
+      og_image_url: c.og_image_url,
+    },
   };
 }
 
-function shareKit({ brand, brand_config, campaign }) {
+function shareKit({ brand_config, campaign }) {
   const domain = brand_config && brand_config.storefront_domain;
   const base = domain ? `https://${domain}` : config.APP_URL;
   const url = `${base}/sale/${campaign.slug}`;

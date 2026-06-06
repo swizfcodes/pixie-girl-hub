@@ -1,15 +1,7 @@
 /**
- * Sales & Quotations + Installment Payments (V2.2 §6.2)
- * Domain events emitted by the service layer.
- *
- * These feed:
- *   - Socket.io real-time updates (via realtime/handlers)
- *   - Audit log (already written separately, but events get extra context)
- *   - AI Insights triggers
- *   - Workflow engine (some events open workflow instances)
- *
- * Use a simple emitter — keep payloads small (just IDs + brand), let
- * subscribers re-query if they need the full record.
+ * Sales (V2.2 §6.2) — domain events.
+ * `order.paid` is the cross-module trigger consumed by Invoicing (raise
+ * invoice) and Accounting (post revenue journal entry).
  */
 
 "use strict";
@@ -21,15 +13,13 @@ const emitter = new EventEmitter();
 emitter.setMaxListeners(50);
 
 function emit(eventType, payload) {
-  const fullType = `sales.${eventType}`;
   try {
-    emitter.emit(fullType, payload);
-    emitter.emit("*", { type: fullType, payload });
+    emitter.emit(`sales.${eventType}`, payload);
+    emitter.emit("*", { type: `sales.${eventType}`, payload });
   } catch (err) {
-    logger.error({ err, eventType: fullType }, "sales event emit failed");
+    logger.error({ err, eventType }, "sales event emit failed");
   }
 }
-
 function on(eventType, handler) {
   emitter.on(`sales.${eventType}`, handler);
 }

@@ -1,75 +1,341 @@
 /**
- * Invoicing & Billing (V2.2 §6.5)
- * Repository — parameterised SQL only. No business logic, no HTTP.
- *
- * Conventions:
- *   - Every function takes a { client?, brand, ... } options object.
- *   - If `client` is provided, run within that transaction; else use the
- *     pool (via `query`).
- *   - All values bound with $1..$N placeholders. NEVER string-interpolate.
- *   - Schema names are switched by brand: pixiegirl.* or faitlynhair.*.
- *   - For shared tables (audit_log, contacts, etc.), use the `shared.` schema
- *     and filter by `business` column.
+ * Invoicing & Billing (V2.2 §6.5) — repository.
+ * invoices.amount_paid_ngn is recomputed by a TRIGGER from invoice_payments;
+ * this layer only inserts rows + flips status.
  */
 
 "use strict";
 
 const { query } = require("../../config/database");
 
-const VALID_BRANDS = new Set(["pixiegirl", "faitlynhair"]);
+const VALID = new Set(["pixiegirl", "faitlynhair"]);
+const t = (brand, tbl) => {
+  if (!VALID.has(brand)) throw new Error(`Invalid brand: ${brand}`);
+  return `${brand}.${tbl}`;
+};
+const ex = (client) => (client ? client.query.bind(client) : query);
 
-function tableFor(brand) {
-  if (!VALID_BRANDS.has(brand)) throw new Error(`Invalid brand: ${brand}`);
-  return `${brand}.invoices`;
+const INV_COLS = [
+  "invoice_number",
+  "order_id",
+  "contact_id",
+  "status",
+  "subtotal_ngn",
+  "discount_amount_ngn",
+  "tax_amount_ngn",
+  "wht_rate",
+  "wht_amount_ngn",
+  "shipping_fee_ngn",
+  "total_ngn",
+  "issue_date",
+  "due_date",
+  "payment_terms",
+];
+const LINE_COLS = [
+  "invoice_id",
+  "sales_order_line_id",
+  "product_id",
+  "variant_id",
+  "description",
+  "sku_snapshot",
+  "quantity",
+  "unit_price_ngn",
+  "line_discount_ngn",
+  "tax_rate",
+  "tax_amount_ngn",
+  "line_total_ngn",
+  "revenue_account_code",
+  "display_order",
+];
+
+function buildInsert(cols, src, extra = {}) {
+  const f = [],
+    ph = [],
+    p = [];
+  let i = 1;
+  for (const col of cols) {
+    if (src[col] === undefined) continue;
+    f.push(col);
+    ph.push(`$${i++}`);
+    p.push(src[col]);
+  }
+  for (const [col, val] of Object.entries(extra)) {
+    f.push(col);
+    ph.push(`$${i++}`);
+    p.push(val);
+  }
+  return { f, ph, p };
 }
 
-async function findAll({
+async function nextNumber({ client, brand, type }) {
+  const { rows } = await ex(client)(
+    `SELECT ${t(brand, "fn_next_document_number")}($1) AS n`,
+    [type],
+  );
+  return rows[0].n;
+}
+async function createInvoice({ client, brand, invoice }) {
+  const { f, ph, p } = buildInsert(INV_COLS, invoice);
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "invoices")} (${f.join(",")}) VALUES (${ph.join(",")}) RETURNING *`,
+    p,
+  );
+  return rows[0];
+}
+async function insertLine({ client, brand, line }) {
+  const { f, ph, p } = buildInsert(LINE_COLS, line);
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "invoice_lines")} (${f.join(",")}) VALUES (${ph.join(",")}) RETURNING *`,
+    p,
+  );
+  return rows[0];
+}
+async function findById({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "invoices")} WHERE invoice_id = $1`,
+    [id],
+  );
+  if (!rows[0]) return null;
+  const { rows: lines } = await ex(client)(
+    `SELECT * FROM ${t(brand, "invoice_lines")} WHERE invoice_id = $1 ORDER BY display_order`,
+    [id],
+  );
+  const { rows: payments } = await ex(client)(
+    `SELECT * FROM ${t(brand, "invoice_payments")} WHERE invoice_id = $1 ORDER BY applied_at`,
+    [id],
+  );
+  return { ...rows[0], lines, payments };
+}
+async function findByOrderId({ client, brand, order_id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "invoices")} WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [order_id],
+  );
+  return rows[0] || null;
+}
+async function listInvoices({
   client,
   brand,
-  scope,
-  user_id,
   filters = {},
   page = 1,
   page_size = 25,
+  offset = 0,
 }) {
-  // TODO: build dynamic WHERE based on filters + scope ('all' | 'team' | 'own')
-  const offset = (page - 1) * page_size;
-  const sql = `
-    SELECT *
-      FROM ${tableFor(brand)}
-     WHERE COALESCE(is_deleted, false) = false
-     ORDER BY created_at DESC
-     LIMIT $1 OFFSET $2
-  `;
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [page_size, offset]);
-  return { data: rows, page, page_size, total: rows.length }; // TODO: real count query
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (filters.status) {
+    where.push(`status = $${i++}`);
+    params.push(filters.status);
+  }
+  if (filters.contact_id) {
+    where.push(`contact_id = $${i++}`);
+    params.push(filters.contact_id);
+  }
+  if (filters.order_id) {
+    where.push(`order_id = $${i++}`);
+    params.push(filters.order_id);
+  }
+  if (filters.overdue) {
+    where.push(
+      `status NOT IN ('paid','void','refunded') AND due_date < CURRENT_DATE`,
+    );
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const run = ex(client);
+  const { rows: c } = await run(
+    `SELECT COUNT(*)::int AS total FROM ${t(brand, "invoices")} ${w}`,
+    params,
+  );
+  const { rows } = await run(
+    `SELECT * FROM ${t(brand, "invoices")} ${w} ORDER BY issue_date DESC, created_at DESC LIMIT $${i++} OFFSET $${i++}`,
+    [...params, page_size, offset],
+  );
+  return {
+    data: rows,
+    meta: {
+      page,
+      page_size,
+      total: c[0].total,
+      has_more: offset + rows.length < c[0].total,
+    },
+  };
+}
+async function setStatus({ client, brand, id, status, extra = {} }) {
+  const sets = ["status = $2"];
+  const params = [id, status];
+  let i = 3;
+  for (const [col, val] of Object.entries(extra)) {
+    sets.push(`${col} = $${i++}`);
+    params.push(val);
+  }
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "invoices")} SET ${sets.join(", ")} WHERE invoice_id = $1 RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+}
+async function applyPayment({ client, brand, payment }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "invoice_payments")} (invoice_id, sales_order_payment_id, amount_applied_ngn, applied_by, notes)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [
+      payment.invoice_id,
+      payment.sales_order_payment_id || null,
+      payment.amount_applied_ngn,
+      payment.applied_by || null,
+      payment.notes || null,
+    ],
+  );
+  return rows[0];
 }
 
-async function findById({ client, brand, id }) {
-  const sql = `SELECT * FROM ${tableFor(brand)} WHERE invoices_id = $1 LIMIT 1`;
-  // NOTE: replace `invoices_id` with the actual PK name for this table
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [id]);
+// ── Credit notes (+ lines) ───────────────────────────────
+async function createCreditNote({ client, brand, note }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "credit_notes")}
+       (credit_note_number, invoice_id, reason, reason_category, cancellation_request_id,
+        subtotal_ngn, tax_amount_ngn, total_ngn, status, issue_date, issued_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',CURRENT_DATE,$9) RETURNING *`,
+    [
+      note.credit_note_number,
+      note.invoice_id,
+      note.reason,
+      note.reason_category || null,
+      note.cancellation_request_id || null,
+      note.subtotal_ngn,
+      note.tax_amount_ngn,
+      note.total_ngn,
+      note.issued_by || null,
+    ],
+  );
+  return rows[0];
+}
+async function insertCreditNoteLine({ client, brand, line }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "credit_note_lines")}
+       (credit_note_id, source_invoice_line_id, description, quantity, unit_price_ngn, tax_rate, tax_amount_ngn, line_total_ngn, display_order)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [
+      line.credit_note_id,
+      line.source_invoice_line_id || null,
+      line.description,
+      line.quantity,
+      line.unit_price_ngn,
+      line.tax_rate,
+      line.tax_amount_ngn,
+      line.line_total_ngn,
+      line.display_order,
+    ],
+  );
+  return rows[0];
+}
+async function findCreditNoteById({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "credit_notes")} WHERE credit_note_id = $1`,
+    [id],
+  );
+  if (!rows[0]) return null;
+  const { rows: lines } = await ex(client)(
+    `SELECT * FROM ${t(brand, "credit_note_lines")} WHERE credit_note_id = $1 ORDER BY display_order`,
+    [id],
+  );
+  return { ...rows[0], lines };
+}
+async function listCreditNotes({
+  client,
+  brand,
+  filters = {},
+  page = 1,
+  page_size = 25,
+  offset = 0,
+}) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (filters.status) {
+    where.push(`status = $${i++}`);
+    params.push(filters.status);
+  }
+  if (filters.invoice_id) {
+    where.push(`invoice_id = $${i++}`);
+    params.push(filters.invoice_id);
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const run = ex(client);
+  const { rows: c } = await run(
+    `SELECT COUNT(*)::int AS total FROM ${t(brand, "credit_notes")} ${w}`,
+    params,
+  );
+  const { rows } = await run(
+    `SELECT * FROM ${t(brand, "credit_notes")} ${w} ORDER BY issue_date DESC, created_at DESC LIMIT $${i++} OFFSET $${i++}`,
+    [...params, page_size, offset],
+  );
+  return {
+    data: rows,
+    meta: {
+      page,
+      page_size,
+      total: c[0].total,
+      has_more: offset + rows.length < c[0].total,
+    },
+  };
+}
+async function setCreditNoteStatus({ client, brand, id, status, extra = {} }) {
+  const sets = ["status = $2"];
+  const params = [id, status];
+  let i = 3;
+  for (const [col, val] of Object.entries(extra)) {
+    sets.push(`${col} = $${i++}`);
+    params.push(val);
+  }
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "credit_notes")} SET ${sets.join(", ")} WHERE credit_note_id = $1 RETURNING *`,
+    params,
+  );
   return rows[0] || null;
 }
 
-async function create({ client, brand, input, user_id }) {
-  // TODO: build INSERT with parameterised columns from `input`
-  throw new Error("TODO: implement invoicing.create");
+// ── Receipts ─────────────────────────────────────────────
+async function createReceipt({ client, brand, receipt }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "receipts")} (receipt_number, invoice_id, payment_id, contact_id, amount_ngn, payment_method, issued_by, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [
+      receipt.receipt_number,
+      receipt.invoice_id || null,
+      receipt.payment_id || null,
+      receipt.contact_id || null,
+      receipt.amount_ngn,
+      receipt.payment_method,
+      receipt.issued_by || null,
+      receipt.notes || null,
+    ],
+  );
+  return rows[0];
+}
+async function listReceipts({ client, brand, invoice_id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "receipts")} WHERE invoice_id = $1 ORDER BY issued_at`,
+    [invoice_id],
+  );
+  return rows;
 }
 
-async function update({ client, brand, id, patch }) {
-  // TODO: build UPDATE with parameterised columns from `patch`
-  throw new Error("TODO: implement invoicing.update");
-}
-
-async function archive({ client, brand, id }) {
-  const sql = `UPDATE ${tableFor(brand)}
-                  SET is_deleted = true, deleted_at = now()
-                WHERE invoices_id = $1`;
-  const exec = client ? client.query.bind(client) : query;
-  await exec(sql, [id]);
-}
-
-module.exports = { findAll, findById, create, update, archive };
+module.exports = {
+  nextNumber,
+  createInvoice,
+  insertLine,
+  findById,
+  findByOrderId,
+  listInvoices,
+  setStatus,
+  applyPayment,
+  createCreditNote,
+  insertCreditNoteLine,
+  findCreditNoteById,
+  listCreditNotes,
+  setCreditNoteStatus,
+  createReceipt,
+  listReceipts,
+};

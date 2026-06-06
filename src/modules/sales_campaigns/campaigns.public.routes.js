@@ -23,12 +23,20 @@ const signupLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: {
-    error: { code: "TOO_MANY_REQUESTS", message: "Too many signups, try again later" },
+    error: {
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many signups, try again later",
+    },
   },
 });
 
 router.get("/:slug", controller.landing);
 router.get("/:slug/stock", controller.stock);
-router.post("/:slug/signup", signupLimiter, validator.validateSignup, controller.signup);
+router.post(
+  "/:slug/signup",
+  signupLimiter,
+  validator.validateSignup,
+  controller.signup,
+);
 
 module.exports = router;

@@ -31,7 +31,10 @@ async function runCampaignStateTransitions() {
       notifications
         .fireGoLiveBlast({ brand, campaign_id: c.campaign_id })
         .catch((err) =>
-          logger.error({ err, brand, id: c.campaign_id }, "go-live blast failed"),
+          logger.error(
+            { err, brand, id: c.campaign_id },
+            "go-live blast failed",
+          ),
         );
       logger.info({ brand, slug: c.slug }, "campaign auto-launched");
     }
@@ -48,7 +51,10 @@ async function runCampaignStateTransitions() {
       notifications
         .generatePostCampaignReport({ brand, campaign_id: c.campaign_id })
         .catch((err) =>
-          logger.error({ err, brand, id: c.campaign_id }, "post-campaign report failed"),
+          logger.error(
+            { err, brand, id: c.campaign_id },
+            "post-campaign report failed",
+          ),
         );
       logger.info({ brand, slug: c.slug }, "campaign auto-ended");
     }

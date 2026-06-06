@@ -1,63 +1,245 @@
 /**
- * Customer Management (V2.2 §6.1)
- * HTTP controller — translates req/res to service calls. No business logic here.
+ * CRM (V2.2 §6.1) — HTTP controllers.
  */
 
 "use strict";
 
 const service = require("./crm.service");
+const { parsePagination } = require("../../utils/pagination");
 
-async function list(req, res) {
-  const result = await service.list({
-    brand: req.brand,
-    user: req.user,
-    scope: req.permission_scope,
-    filters: req.query,
-    page: parseInt(req.query.page || "1", 10),
-    page_size: Math.min(parseInt(req.query.page_size || "25", 10), 100),
+const base = (req) => ({
+  brand: req.brand,
+  user: req.user,
+  request_id: req.request_id,
+});
+
+// Pipelines + stages
+const listPipelines = async (req, res) =>
+  res.json({ data: await service.listPipelines({ brand: req.brand }) });
+const createPipeline = async (req, res) =>
+  res.status(201).json({
+    data: await service.createPipeline({ ...base(req), input: req.body }),
   });
-  res.json(result);
-}
-
-async function getById(req, res) {
-  const item = await service.getById({
-    brand: req.brand,
-    user: req.user,
-    scope: req.permission_scope,
-    id: req.params.id,
+const updatePipeline = async (req, res) =>
+  res.json({
+    data: await service.updatePipeline({
+      ...base(req),
+      id: req.params.pipeId,
+      patch: req.body,
+    }),
   });
-  res.json({ data: item });
-}
-
-async function create(req, res) {
-  const created = await service.create({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    input: req.body,
+const archivePipeline = async (req, res) => {
+  await service.archivePipeline({ ...base(req), id: req.params.pipeId });
+  res.status(204).end();
+};
+const listStages = async (req, res) =>
+  res.json({
+    data: await service.listStages({
+      brand: req.brand,
+      pipeline_id: req.params.pipeId,
+    }),
   });
-  res.status(201).json({ data: created });
-}
-
-async function update(req, res) {
-  const updated = await service.update({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    id: req.params.id,
-    patch: req.body,
+const createStage = async (req, res) =>
+  res.status(201).json({
+    data: await service.createStage({
+      ...base(req),
+      pipeline_id: req.params.pipeId,
+      input: req.body,
+    }),
   });
-  res.json({ data: updated });
-}
+const updateStage = async (req, res) =>
+  res.json({
+    data: await service.updateStage({
+      ...base(req),
+      stage_id: req.params.stageId,
+      patch: req.body,
+    }),
+  });
+const deleteStage = async (req, res) => {
+  await service.deleteStage({ ...base(req), stage_id: req.params.stageId });
+  res.status(204).end();
+};
 
-async function archive(req, res) {
-  await service.archive({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    id: req.params.id,
+// Deals
+async function listDeals(req, res) {
+  const { page, page_size } = parsePagination(req.query);
+  res.json(
+    await service.listDeals({
+      brand: req.brand,
+      scope: req.permission_scope,
+      user: req.user,
+      filters: {
+        pipeline_id: req.query.pipeline_id,
+        current_stage_id: req.query.stage_id,
+        status: req.query.status,
+        contact_id: req.query.contact_id,
+        assigned_to: req.query.assigned_to,
+        q: req.query.q,
+      },
+      page,
+      page_size,
+    }),
+  );
+}
+const getDeal = async (req, res) =>
+  res.json({
+    data: await service.getDeal({
+      brand: req.brand,
+      scope: req.permission_scope,
+      user: req.user,
+      id: req.params.id,
+    }),
+  });
+const createDeal = async (req, res) =>
+  res.status(201).json({
+    data: await service.createDeal({ ...base(req), input: req.body }),
+  });
+const updateDeal = async (req, res) =>
+  res.json({
+    data: await service.updateDeal({
+      ...base(req),
+      id: req.params.id,
+      patch: req.body,
+    }),
+  });
+const moveStage = async (req, res) =>
+  res.json({
+    data: await service.moveStage({
+      ...base(req),
+      id: req.params.id,
+      stage_id: req.body.stage_id,
+    }),
+  });
+const setStatus = async (req, res) =>
+  res.json({
+    data: await service.setStatus({
+      ...base(req),
+      id: req.params.id,
+      status: req.body.status,
+      lost_reason: req.body.lost_reason,
+    }),
+  });
+const deleteDeal = async (req, res) => {
+  await service.deleteDeal({ ...base(req), id: req.params.id });
+  res.status(204).end();
+};
+
+// Activities + notes
+const listActivities = async (req, res) =>
+  res.json({
+    data: await service.listActivities({ brand: req.brand, id: req.params.id }),
+  });
+const addActivity = async (req, res) =>
+  res.status(201).json({
+    data: await service.addActivity({
+      ...base(req),
+      id: req.params.id,
+      input: req.body,
+    }),
+  });
+const listNotes = async (req, res) =>
+  res.json({
+    data: await service.listNotes({ brand: req.brand, id: req.params.id }),
+  });
+const addNote = async (req, res) =>
+  res.status(201).json({
+    data: await service.addNote({
+      ...base(req),
+      id: req.params.id,
+      input: req.body,
+    }),
+  });
+
+// Customer profile (preferences / measurements / churn) — keyed by contactId
+const getPreferences = async (req, res) =>
+  res.json({
+    data: await service.getPreferences({
+      brand: req.brand,
+      contact_id: req.params.contactId,
+    }),
+  });
+const upsertPreferences = async (req, res) =>
+  res.json({
+    data: await service.upsertPreferences({
+      ...base(req),
+      contact_id: req.params.contactId,
+      patch: req.body,
+    }),
+  });
+const listMeasurements = async (req, res) =>
+  res.json({
+    data: await service.listMeasurements({
+      brand: req.brand,
+      contact_id: req.params.contactId,
+    }),
+  });
+const addMeasurement = async (req, res) =>
+  res.status(201).json({
+    data: await service.addMeasurement({
+      ...base(req),
+      contact_id: req.params.contactId,
+      input: req.body,
+    }),
+  });
+const updateMeasurement = async (req, res) =>
+  res.json({
+    data: await service.updateMeasurement({
+      ...base(req),
+      contact_id: req.params.contactId,
+      measurement_id: req.params.measurementId,
+      patch: req.body,
+    }),
+  });
+const deleteMeasurement = async (req, res) => {
+  await service.deleteMeasurement({
+    ...base(req),
+    contact_id: req.params.contactId,
+    measurement_id: req.params.measurementId,
   });
   res.status(204).end();
-}
+};
+const listChurnScores = async (req, res) =>
+  res.json({
+    data: await service.listChurnScores({
+      brand: req.brand,
+      contact_id: req.params.contactId,
+    }),
+  });
+const recordChurnScore = async (req, res) =>
+  res.status(201).json({
+    data: await service.recordChurnScore({
+      ...base(req),
+      contact_id: req.params.contactId,
+      input: req.body,
+    }),
+  });
 
-module.exports = { list, getById, create, update, archive };
+module.exports = {
+  listPipelines,
+  createPipeline,
+  updatePipeline,
+  archivePipeline,
+  listStages,
+  createStage,
+  updateStage,
+  deleteStage,
+  listDeals,
+  getDeal,
+  createDeal,
+  updateDeal,
+  moveStage,
+  setStatus,
+  deleteDeal,
+  listActivities,
+  addActivity,
+  listNotes,
+  addNote,
+  getPreferences,
+  upsertPreferences,
+  listMeasurements,
+  addMeasurement,
+  updateMeasurement,
+  deleteMeasurement,
+  listChurnScores,
+  recordChurnScore,
+};

@@ -18,7 +18,7 @@ const main = require("./campaigns.service");
 const businessConfig = require("../business_setup/business-config.repo");
 const email = require("../../services/email.service");
 const whatsapp = require("../../services/whatsapp.service");
-const storage = require("../../services/storage.service");
+const documents = require("../documents/documents.service");
 const { config } = require("../../config/env");
 const { logger } = require("../../config/logger");
 
@@ -30,7 +30,10 @@ async function fireGoLiveBlast({ brand, campaign_id }) {
   const kit = main.buildShareKit
     ? main.buildShareKit({ brand, brand_config: cfg, campaign })
     : null;
-  const base = cfg && cfg.storefront_domain ? `https://${cfg.storefront_domain}` : config.APP_URL;
+  const base =
+    cfg && cfg.storefront_domain
+      ? `https://${cfg.storefront_domain}`
+      : config.APP_URL;
   const url = `${base}/sale/${campaign.slug}?utm_source=blast&utm_medium=launch&utm_campaign=${encodeURIComponent(campaign.slug)}`;
 
   const signups = await repo.listPendingSignups({ brand, campaign_id });
@@ -38,8 +41,10 @@ async function fireGoLiveBlast({ brand, campaign_id }) {
 
   for (const s of signups) {
     try {
-      const wantsEmail = (s.notify_via === "email" || s.notify_via === "both") && s.email;
-      const wantsWa = (s.notify_via === "whatsapp" || s.notify_via === "both") && s.phone;
+      const wantsEmail =
+        (s.notify_via === "email" || s.notify_via === "both") && s.email;
+      const wantsWa =
+        (s.notify_via === "whatsapp" || s.notify_via === "both") && s.phone;
 
       if (wantsEmail) {
         await email.send({
@@ -60,10 +65,16 @@ async function fireGoLiveBlast({ brand, campaign_id }) {
         sent++;
       }
     } catch (err) {
-      logger.error({ err, signup_id: s.signup_id }, "campaign blast send failed");
+      logger.error(
+        { err, signup_id: s.signup_id },
+        "campaign blast send failed",
+      );
     }
   }
-  logger.info({ brand, campaign_id, sent, total: signups.length }, "go-live blast complete");
+  logger.info(
+    { brand, campaign_id, sent, total: signups.length },
+    "go-live blast complete",
+  );
   return { sent, total: signups.length, share_url: url, kit };
 }
 
@@ -101,7 +112,8 @@ async function renderReportPdf(data) {
     doc.on("error", reject);
 
     const r = data.rollups;
-    const ngn = (v) => `NGN ${Number(v || 0).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`;
+    const ngn = (v) =>
+      `NGN ${Number(v || 0).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`;
 
     doc.fontSize(20).text("Campaign Performance Report", { align: "left" });
     doc.moveDown(0.5);
@@ -110,7 +122,9 @@ async function renderReportPdf(data) {
       .fontSize(10)
       .fillColor("#666")
       .text(`/${data.campaign.slug}`)
-      .text(`${new Date(data.campaign.starts_at).toDateString()} → ${new Date(data.campaign.ends_at).toDateString()}`)
+      .text(
+        `${new Date(data.campaign.starts_at).toDateString()} → ${new Date(data.campaign.ends_at).toDateString()}`,
+      )
       .text(`Status: ${data.campaign.status}`);
     doc.moveDown();
 
@@ -135,26 +149,50 @@ async function renderReportPdf(data) {
       doc.fontSize(13).text("Featured / campaign products");
       doc.moveDown(0.3).fontSize(11);
       for (const p of data.top_products) {
-        const price = p.campaign_price_ngn ? ` — ${ngn(p.campaign_price_ngn)}` : "";
-        doc.text(`• ${p.name || "(unnamed)"}${p.is_featured ? " [featured]" : ""}${price}`);
+        const price = p.campaign_price_ngn
+          ? ` — ${ngn(p.campaign_price_ngn)}`
+          : "";
+        doc.text(
+          `• ${p.name || "(unnamed)"}${p.is_featured ? " [featured]" : ""}${price}`,
+        );
       }
     }
 
     doc.moveDown(2);
-    doc.fontSize(8).fillColor("#999").text(`Generated ${new Date().toISOString()} — Pixie Girl Hub`, { align: "center" });
+    doc
+      .fontSize(8)
+      .fillColor("#999")
+      .text(`Generated ${new Date().toISOString()} — Pixie Girl Hub`, {
+        align: "center",
+      });
     doc.end();
   });
 }
 
-async function generatePostCampaignReport({ brand, campaign_id }) {
+async function generatePostCampaignReport({
+  brand,
+  campaign_id,
+  user_id = null,
+}) {
   const data = await buildReportData({ brand, campaign_id });
   const pdf = await renderReportPdf(data);
-  const stored = await storage.put(pdf, {
-    key: `reports/campaigns/${brand}/${campaign_id}.pdf`,
-    contentType: "application/pdf",
+  // Route through the Documents module (6.13) — the single file gateway.
+  const doc = await documents.store({
+    brand,
+    user_id,
+    buffer: pdf,
+    filename: `campaign-report-${data.campaign.slug}.pdf`,
+    mime_type: "application/pdf",
+    document_type: "campaign_report",
+    title: `${data.campaign.name} — performance report`,
+    reference_type: "sales_campaign",
+    reference_id: campaign_id,
   });
-  logger.info({ brand, campaign_id, url: stored.public_url }, "post-campaign report generated");
-  return { ...data, pdf_url: stored.public_url };
+  logger.info(
+    { brand, campaign_id, document_id: doc.document_id },
+    "post-campaign report generated",
+  );
+  return { ...data, document_id: doc.document_id, pdf_url: doc.url };
 }
 
 module.exports = {

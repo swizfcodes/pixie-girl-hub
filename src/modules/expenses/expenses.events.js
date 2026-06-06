@@ -1,15 +1,5 @@
 /**
- * Expense Management (V2.2 §6.7)
- * Domain events emitted by the service layer.
- *
- * These feed:
- *   - Socket.io real-time updates (via realtime/handlers)
- *   - Audit log (already written separately, but events get extra context)
- *   - AI Insights triggers
- *   - Workflow engine (some events open workflow instances)
- *
- * Use a simple emitter — keep payloads small (just IDs + brand), let
- * subscribers re-query if they need the full record.
+ * Expense Management (V2.2 §6.7) — domain events.
  */
 
 "use strict";
@@ -21,15 +11,13 @@ const emitter = new EventEmitter();
 emitter.setMaxListeners(50);
 
 function emit(eventType, payload) {
-  const fullType = `expenses.${eventType}`;
   try {
-    emitter.emit(fullType, payload);
-    emitter.emit("*", { type: fullType, payload });
+    emitter.emit(`expenses.${eventType}`, payload);
+    emitter.emit("*", { type: `expenses.${eventType}`, payload });
   } catch (err) {
-    logger.error({ err, eventType: fullType }, "expenses event emit failed");
+    logger.error({ err, eventType }, "expenses event emit failed");
   }
 }
-
 function on(eventType, handler) {
   emitter.on(`expenses.${eventType}`, handler);
 }

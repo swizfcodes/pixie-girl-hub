@@ -1,47 +1,102 @@
 /**
- * Stock SSOT (V2.2 §6.9)
- *
- * Module: stock
- * Permission key: stock
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   stock_locations, stock_movements, stock_levels, stock_alerts, stock_adjustments, stock_transfers, inbound_shipments
+ * Stock (V2.2 §6.9) — routes. Mounted at /api/v1/stock. Permission key: stock.
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./stock.controller");
-const validator = require("./stock.validator");
+const c = require("./stock.controller");
+const v = require("./stock.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
 const router = express.Router();
+const can = (a) => requirePermission("stock", a);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("stock", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get("/:id", requirePermission("stock", "view"), controller.getById);
-
-// ── POST /            create ───────────────────────────────
+// Locations
+router.get("/locations", can("view"), c.listLocations);
 router.post(
-  "/",
-  requirePermission("stock", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/locations",
+  can("create"),
+  v.validateLocationCreate,
+  c.createLocation,
 );
-
-// ── PATCH /:id        update ───────────────────────────────
 router.patch(
-  "/:id",
-  requirePermission("stock", "edit"),
-  validator.validateUpdate,
-  controller.update,
+  "/locations/:locId",
+  can("edit"),
+  v.validateLocationUpdate,
+  c.updateLocation,
 );
 
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete("/:id", requirePermission("stock", "delete"), controller.archive);
+// Valuation (read-only; on_hand × variant standard cost)
+router.get("/valuation", can("view"), c.valuation);
 
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+// Levels (read-only; on_hand changes only via movements)
+router.get("/levels", can("view"), c.listLevels);
+router.get("/levels/variant/:variantId", can("view"), c.variantStock);
+
+// Movements (the only write path to stock quantity)
+router.get("/movements", can("view"), c.listMovements);
+router.post(
+  "/movements",
+  can("edit"),
+  v.validateMovementCreate,
+  c.recordMovement,
+);
+
+// Adjustments (count corrections; post → adjustment movements)
+router.get("/adjustments", can("view"), c.listAdjustments);
+router.post(
+  "/adjustments",
+  can("create"),
+  v.validateAdjustmentCreate,
+  c.createAdjustment,
+);
+router.get("/adjustments/:adjId", can("view"), c.getAdjustment);
+router.post("/adjustments/:adjId/post", can("approve"), c.postAdjustment);
+
+// Transfers (between locations; dispatch/receive → movements)
+router.get("/transfers", can("view"), c.listTransfers);
+router.post(
+  "/transfers",
+  can("create"),
+  v.validateTransferCreate,
+  c.createTransfer,
+);
+router.get("/transfers/:trfId", can("view"), c.getTransfer);
+router.post("/transfers/:trfId/dispatch", can("edit"), c.dispatchTransfer);
+router.post(
+  "/transfers/:trfId/receive",
+  can("edit"),
+  v.validateTransferReceive,
+  c.receiveTransfer,
+);
+
+// Alerts
+router.get("/alerts", can("view"), c.listAlerts);
+router.post("/alerts/:alertId/acknowledge", can("edit"), c.ackAlert);
+router.post("/alerts/:alertId/dismiss", can("edit"), c.dismissAlert);
+router.post("/alerts/:alertId/resolve", can("edit"), c.resolveAlert);
+
+// Inbound shipments (factory imports; receive → receive movements)
+router.get("/shipments", can("view"), c.listShipments);
+router.post(
+  "/shipments",
+  can("create"),
+  v.validateShipmentCreate,
+  c.createShipment,
+);
+router.get("/shipments/:shpId", can("view"), c.getShipment);
+router.patch(
+  "/shipments/:shpId/status",
+  can("edit"),
+  v.validateShipmentStatus,
+  c.updateShipmentStatus,
+);
+router.post(
+  "/shipments/:shpId/receive",
+  can("edit"),
+  v.validateShipmentReceive,
+  c.receiveShipment,
+);
 
 module.exports = router;

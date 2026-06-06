@@ -15,7 +15,7 @@ const schema = z.object({
     .default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_NAME: z.string().default("pixiegirl-hub-backend"),
-  APP_URL: z.string().url().default("http://localhost:3000"),
+  APP_URL: z.string().url().default("http://localhost:7000"),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace"])
     .default("info"),
@@ -122,10 +122,8 @@ function validateEnv() {
   if (_config) return _config;
   const parsed = schema.safeParse(process.env);
   if (!parsed.success) {
-    // eslint-disable-next-line no-console
     console.error("❌ Invalid environment variables:");
     for (const issue of parsed.error.issues) {
-      // eslint-disable-next-line no-console
       console.error(`  - ${issue.path.join(".")}: ${issue.message}`);
     }
     process.exit(1);

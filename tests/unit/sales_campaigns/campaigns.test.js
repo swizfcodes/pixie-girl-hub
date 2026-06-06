@@ -11,7 +11,10 @@ const repo = require("../../../src/modules/sales_campaigns/campaigns.repo");
 const service = require("../../../src/modules/sales_campaigns/campaigns.service");
 const discount = require("../../../src/modules/sales_campaigns/campaigns.discount.service");
 const wf = require("../../../src/workflows/engine");
-const { createSchema, signupSchema } = require("../../../src/modules/sales_campaigns/campaigns.validator");
+const {
+  createSchema,
+  signupSchema,
+} = require("../../../src/modules/sales_campaigns/campaigns.validator");
 
 function liveCampaign(over = {}) {
   return {
@@ -36,9 +39,17 @@ describe("resolveState", () => {
   test("before / live / ended", () => {
     const future = new Date(Date.now() + 7200_000).toISOString();
     const past = new Date(Date.now() - 7200_000).toISOString();
-    expect(service.resolveState({ status: "scheduled", starts_at: future, ends_at: future })).toBe("before");
+    expect(
+      service.resolveState({
+        status: "scheduled",
+        starts_at: future,
+        ends_at: future,
+      }),
+    ).toBe("before");
     expect(service.resolveState(liveCampaign())).toBe("live");
-    expect(service.resolveState({ status: "ended", starts_at: past, ends_at: past })).toBe("ended");
+    expect(
+      service.resolveState({ status: "ended", starts_at: past, ends_at: past }),
+    ).toBe("ended");
   });
 });
 
@@ -48,7 +59,9 @@ describe("workflow normaliseStages", () => {
     expect(s[0].approvers[0]).toEqual({ type: "role", value: "ceo" });
   });
   test("reads the simple approver_role form", () => {
-    const s = wf.normaliseStages({ stages: [{ step: 1, approver_role: "manager" }] });
+    const s = wf.normaliseStages({
+      stages: [{ step: 1, approver_role: "manager" }],
+    });
     expect(s[0].approvers[0]).toEqual({ type: "role", value: "manager" });
   });
 });
@@ -66,13 +79,17 @@ describe("createSchema validation", () => {
     expect(() => createSchema.parse(base)).not.toThrow();
   });
   test("rejects ends_at <= starts_at", () => {
-    expect(() => createSchema.parse({ ...base, ends_at: base.starts_at })).toThrow();
+    expect(() =>
+      createSchema.parse({ ...base, ends_at: base.starts_at }),
+    ).toThrow();
   });
   test("rejects percentage > 1", () => {
     expect(() => createSchema.parse({ ...base, discount_value: 20 })).toThrow();
   });
   test("rejects a bad slug", () => {
-    expect(() => createSchema.parse({ ...base, slug: "Black Friday!" })).toThrow();
+    expect(() =>
+      createSchema.parse({ ...base, slug: "Black Friday!" }),
+    ).toThrow();
   });
 });
 
@@ -90,7 +107,9 @@ describe("discount engine", () => {
     const res = await discount.resolveDiscount({
       brand: "pixiegirl",
       campaignRef: liveCampaign(),
-      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 2 }] },
+      cart: {
+        items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 2 }],
+      },
     });
     expect(res.eligible).toBe(true);
     expect(res.total_discount_ngn).toBe("100000.00"); // 50% of 100k * 2
@@ -101,7 +120,9 @@ describe("discount engine", () => {
     const res = await discount.resolveDiscount({
       brand: "pixiegirl",
       campaignRef: liveCampaign(),
-      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }] },
+      cart: {
+        items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }],
+      },
       getMarginFloor: async () => "60000.00", // never below 60k
     });
     expect(res.clamped).toBe(true);
@@ -113,7 +134,9 @@ describe("discount engine", () => {
     const res = await discount.resolveDiscount({
       brand: "pixiegirl",
       campaignRef: liveCampaign({ min_order_value_ngn: "500000.00" }),
-      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }] },
+      cart: {
+        items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }],
+      },
     });
     expect(res.eligible).toBe(false);
     expect(res.reason).toBe("below_min_order_value");
@@ -126,7 +149,9 @@ describe("discount engine", () => {
     const res = await discount.resolveDiscount({
       brand: "pixiegirl",
       campaignRef: liveCampaign(),
-      cart: { items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }] },
+      cart: {
+        items: [{ product_id: "p1", unit_price_ngn: "100000.00", quantity: 1 }],
+      },
     });
     expect(res.eligible).toBe(false);
     expect(res.reason).toBe("no_eligible_items");

@@ -80,3 +80,37 @@ Some actions don't have a simple "allowed/denied" — they require an approval w
 - Cash disbursements above ₦20,000 require CEO approval
 
 These are NOT checked in `requirePermission`. Instead, the service layer detects the threshold and opens a `workflow_instance`. The user can submit the request, but it sits in pending until approval. See `WORKFLOWS.md`.
+
+---
+
+## Administration surface (`/api/v1/access`)
+
+RBAC is administered by the **Access** module (`src/modules/access/`), gated on
+the `settings` permission (the owner/CEO bypasses). It is the only supported way
+to create roles, edit the role→permission matrix, grant/revoke roles, and set a
+user's brand access — the middleware otherwise only _reads_ permissions.
+
+| Area              | Endpoint                                                                     |
+| ----------------- | ---------------------------------------------------------------------------- |
+| Catalog           | `GET /access/catalog`                                                        |
+| Roles             | `GET/POST /access/roles`, `…/roles/:role_id`                                 |
+| Permission matrix | `GET/PUT /access/roles/:role_id/permissions`                                 |
+| Grants            | `GET/POST /access/users/:user_id/roles`, `DELETE …/roles/:role_id?business=` |
+| Brand access      | `GET/PUT /access/users/:user_id/access`                                      |
+
+**Catalog = enforcement vocabulary.** The matrix is built from the module keys
+the routes actually enforce (`org_workflow`, `sales_campaigns`, `hr_payroll`, …),
+harvested in `access.catalog.js`. The abbreviated keys in the
+`shared.permissions` schema comment (`workflow`, `campaigns`, `staff`) are NOT
+the enforced keys; permission writes are validated against the catalog so the
+table can't drift from what `requirePermission` checks. (Note: the
+`000015_shared_seed_data.sql` owner seed still uses some abbreviated keys — the
+owner bypasses, so it works for the owner, but non-owner roles should be granted
+against catalog keys.)
+
+**Escalation guards.** A delegated `settings` admin cannot delete system roles,
+modify system roles or their permissions, or grant/revoke the `owner` role; and
+the last active owner cannot be revoked. Only the owner/CEO can do these.
+
+**Live effect.** The middleware reads `shared.permissions` with no cache, so
+matrix/grant changes apply on the user's next request.

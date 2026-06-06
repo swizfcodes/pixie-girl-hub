@@ -1,75 +1,382 @@
 /**
- * Accounting & Finance (V2.2 §6.6)
- * Repository — parameterised SQL only. No business logic, no HTTP.
- *
- * Conventions:
- *   - Every function takes a { client?, brand, ... } options object.
- *   - If `client` is provided, run within that transaction; else use the
- *     pool (via `query`).
- *   - All values bound with $1..$N placeholders. NEVER string-interpolate.
- *   - Schema names are switched by brand: pixiegirl.* or faitlynhair.*.
- *   - For shared tables (audit_log, contacts, etc.), use the `shared.` schema
- *     and filter by `business` column.
+ * Accounting & Finance (V2.2 §6.6) — repository.
+ * Tables (per-brand): account_groups, chart_of_accounts, fiscal_periods,
+ * journal_entries, journal_lines. Double-entry integrity (DR=CR, immutable
+ * once posted) is enforced by DB triggers; this layer only writes rows.
  */
 
 "use strict";
 
 const { query } = require("../../config/database");
 
-const VALID_BRANDS = new Set(["pixiegirl", "faitlynhair"]);
+const VALID = new Set(["pixiegirl", "faitlynhair"]);
+const t = (brand, tbl) => {
+  if (!VALID.has(brand)) throw new Error(`Invalid brand: ${brand}`);
+  return `${brand}.${tbl}`;
+};
+const ex = (client) => (client ? client.query.bind(client) : query);
 
-function tableFor(brand) {
-  if (!VALID_BRANDS.has(brand)) throw new Error(`Invalid brand: ${brand}`);
-  return `${brand}.chart_of_accounts`;
+// ── Account groups ───────────────────────────────────────
+async function listGroups({ client, brand }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "account_groups")} ORDER BY display_order, group_code`,
+  );
+  return rows;
 }
-
-async function findAll({
-  client,
-  brand,
-  scope,
-  user_id,
-  filters = {},
-  page = 1,
-  page_size = 25,
-}) {
-  // TODO: build dynamic WHERE based on filters + scope ('all' | 'team' | 'own')
-  const offset = (page - 1) * page_size;
-  const sql = `
-    SELECT *
-      FROM ${tableFor(brand)}
-     WHERE COALESCE(is_deleted, false) = false
-     ORDER BY created_at DESC
-     LIMIT $1 OFFSET $2
-  `;
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [page_size, offset]);
-  return { data: rows, page, page_size, total: rows.length }; // TODO: real count query
-}
-
-async function findById({ client, brand, id }) {
-  const sql = `SELECT * FROM ${tableFor(brand)} WHERE chart_of_accounts_id = $1 LIMIT 1`;
-  // NOTE: replace `chart_of_accounts_id` with the actual PK name for this table
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [id]);
+// Only presentational fields are editable; group_type/normal_balance/statement
+// are structural and must not change (they drive the financial reports).
+async function updateGroup({ client, brand, id, patch }) {
+  const cols = ["group_name", "display_order", "is_active"];
+  const sets = [];
+  const params = [id];
+  let i = 2;
+  for (const col of cols) {
+    if (patch[col] === undefined) continue;
+    sets.push(`${col} = $${i++}`);
+    params.push(patch[col]);
+  }
+  if (sets.length === 0) {
+    const { rows } = await ex(client)(
+      `SELECT * FROM ${t(brand, "account_groups")} WHERE group_id = $1`,
+      [id],
+    );
+    return rows[0] || null;
+  }
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "account_groups")} SET ${sets.join(", ")} WHERE group_id = $1 RETURNING *`,
+    params,
+  );
   return rows[0] || null;
 }
 
-async function create({ client, brand, input, user_id }) {
-  // TODO: build INSERT with parameterised columns from `input`
-  throw new Error("TODO: implement accounting.create");
+// ── Chart of accounts ────────────────────────────────────
+const ACCOUNT_COLS = [
+  "account_code",
+  "account_name",
+  "group_id",
+  "parent_account_id",
+  "description",
+  "is_control_account",
+  "control_subledger",
+  "tax_code",
+  "account_currency",
+  "allow_posting",
+  "is_active",
+  "display_order",
+];
+function buildInsert(cols, src, extra = {}) {
+  const f = [],
+    ph = [],
+    p = [];
+  let i = 1;
+  for (const col of cols) {
+    if (src[col] === undefined) continue;
+    f.push(col);
+    ph.push(`$${i++}`);
+    p.push(src[col]);
+  }
+  for (const [col, val] of Object.entries(extra)) {
+    f.push(col);
+    ph.push(`$${i++}`);
+    p.push(val);
+  }
+  return { f, ph, p };
+}
+function buildUpdate(cols, src, start = 1) {
+  const f = [],
+    p = [];
+  let i = start;
+  for (const col of cols) {
+    if (src[col] === undefined) continue;
+    f.push(`${col} = $${i++}`);
+    p.push(src[col]);
+  }
+  return { f, p, next: i };
 }
 
-async function update({ client, brand, id, patch }) {
-  // TODO: build UPDATE with parameterised columns from `patch`
-  throw new Error("TODO: implement accounting.update");
+async function listAccounts({ client, brand, filters = {} }) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (filters.is_active !== undefined) {
+    where.push(`is_active = $${i++}`);
+    params.push(filters.is_active);
+  }
+  if (filters.q) {
+    where.push(`(account_name ILIKE $${i} OR account_code ILIKE $${i})`);
+    params.push(`%${filters.q}%`);
+    i++;
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "chart_of_accounts")} ${w} ORDER BY account_code`,
+    params,
+  );
+  return rows;
+}
+async function getAccount({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "chart_of_accounts")} WHERE account_id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+async function getAccountByCode({ client, brand, code }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "chart_of_accounts")} WHERE account_code = $1 AND is_active = true AND allow_posting = true`,
+    [code],
+  );
+  return rows[0] || null;
+}
+async function createAccount({ client, brand, input }) {
+  const { f, ph, p } = buildInsert(ACCOUNT_COLS, input);
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "chart_of_accounts")} (${f.join(",")}) VALUES (${ph.join(",")}) RETURNING *`,
+    p,
+  );
+  return rows[0];
+}
+async function updateAccount({ client, brand, id, patch }) {
+  const { f, p, next } = buildUpdate(ACCOUNT_COLS, patch);
+  if (!f.length) return getAccount({ client, brand, id });
+  p.push(id);
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "chart_of_accounts")} SET ${f.join(",")} WHERE account_id = $${next} RETURNING *`,
+    p,
+  );
+  return rows[0] || null;
 }
 
-async function archive({ client, brand, id }) {
-  const sql = `UPDATE ${tableFor(brand)}
-                  SET is_deleted = true, deleted_at = now()
-                WHERE chart_of_accounts_id = $1`;
-  const exec = client ? client.query.bind(client) : query;
-  await exec(sql, [id]);
+// ── Fiscal periods ───────────────────────────────────────
+async function listPeriods({ client, brand }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "fiscal_periods")} ORDER BY fiscal_year DESC, period_number DESC`,
+  );
+  return rows;
+}
+async function getPeriod({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "fiscal_periods")} WHERE period_id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+async function findActivePeriod({ client, brand, date }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "fiscal_periods")}
+      WHERE $1::date BETWEEN starts_on AND ends_on AND status IN ('open','adjusted','closing')
+      ORDER BY starts_on DESC LIMIT 1`,
+    [date],
+  );
+  return rows[0] || null;
+}
+async function createPeriod({ client, brand, input }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "fiscal_periods")} (fiscal_year, period_number, period_name, starts_on, ends_on, status, is_year_end)
+     VALUES ($1,$2,$3,$4,$5,COALESCE($6,'open'),COALESCE($7,false)) RETURNING *`,
+    [
+      input.fiscal_year,
+      input.period_number,
+      input.period_name,
+      input.starts_on,
+      input.ends_on,
+      input.status,
+      input.is_year_end,
+    ],
+  );
+  return rows[0];
+}
+async function closePeriod({ client, brand, id, user_id }) {
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "fiscal_periods")} SET status = 'closed', closed_by = $2, closed_at = now() WHERE period_id = $1 RETURNING *`,
+    [id, user_id || null],
+  );
+  return rows[0] || null;
 }
 
-module.exports = { findAll, findById, create, update, archive };
+// ── Journals ─────────────────────────────────────────────
+async function nextEntryNumber({ client, brand }) {
+  const { rows } = await ex(client)(
+    `SELECT ${t(brand, "fn_next_document_number")}('journal_entry') AS n`,
+  );
+  return rows[0].n;
+}
+async function insertEntry({ client, brand, entry }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "journal_entries")}
+       (entry_number, source_type, source_table, source_id, fiscal_period_id, posting_date,
+        transaction_currency, fx_rate_used, description, reference, status)
+     VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,'NGN'),COALESCE($8,1),$9,$10,'draft') RETURNING *`,
+    [
+      entry.entry_number,
+      entry.source_type,
+      entry.source_table || null,
+      entry.source_id || null,
+      entry.fiscal_period_id,
+      entry.posting_date,
+      entry.transaction_currency,
+      entry.fx_rate_used,
+      entry.description,
+      entry.reference || null,
+    ],
+  );
+  return rows[0];
+}
+async function insertLine({ client, brand, line }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "journal_lines")}
+       (entry_id, account_id, description, debit_ngn, credit_ngn, contact_id, invoice_id, cost_centre, project, display_order)
+     VALUES ($1,$2,$3,COALESCE($4,0),COALESCE($5,0),$6,$7,$8,$9,COALESCE($10,0)) RETURNING *`,
+    [
+      line.entry_id,
+      line.account_id,
+      line.description || null,
+      line.debit_ngn,
+      line.credit_ngn,
+      line.contact_id || null,
+      line.invoice_id || null,
+      line.cost_centre || null,
+      line.project || null,
+      line.display_order,
+    ],
+  );
+  return rows[0];
+}
+async function setEntryStatus({ client, brand, id, status, user_id }) {
+  const stamp =
+    status === "posted" ? ", posted_at = now(), posted_by = $3" : "";
+  const params =
+    status === "posted" ? [id, status, user_id || null] : [id, status];
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "journal_entries")} SET status = $2${stamp} WHERE entry_id = $1 RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+}
+async function findEntryById({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "journal_entries")} WHERE entry_id = $1`,
+    [id],
+  );
+  if (!rows[0]) return null;
+  const { rows: lines } = await ex(client)(
+    `SELECT jl.*, coa.account_code, coa.account_name
+       FROM ${t(brand, "journal_lines")} jl
+       JOIN ${t(brand, "chart_of_accounts")} coa ON coa.account_id = jl.account_id
+      WHERE jl.entry_id = $1 ORDER BY jl.display_order`,
+    [id],
+  );
+  return { ...rows[0], lines };
+}
+async function listEntries({
+  client,
+  brand,
+  filters = {},
+  page = 1,
+  page_size = 25,
+  offset = 0,
+}) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (filters.status) {
+    where.push(`status = $${i++}`);
+    params.push(filters.status);
+  }
+  if (filters.source_type) {
+    where.push(`source_type = $${i++}`);
+    params.push(filters.source_type);
+  }
+  if (filters.from) {
+    where.push(`posting_date >= $${i++}`);
+    params.push(filters.from);
+  }
+  if (filters.to) {
+    where.push(`posting_date <= $${i++}`);
+    params.push(filters.to);
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const run = ex(client);
+  const { rows: c } = await run(
+    `SELECT COUNT(*)::int AS total FROM ${t(brand, "journal_entries")} ${w}`,
+    params,
+  );
+  const { rows } = await run(
+    `SELECT * FROM ${t(brand, "journal_entries")} ${w} ORDER BY posting_date DESC, created_at DESC LIMIT $${i++} OFFSET $${i++}`,
+    [...params, page_size, offset],
+  );
+  return {
+    data: rows,
+    meta: {
+      page,
+      page_size,
+      total: c[0].total,
+      has_more: offset + rows.length < c[0].total,
+    },
+  };
+}
+async function setEntryReversed({ client, brand, id, reversal_entry_id }) {
+  await ex(client)(
+    `UPDATE ${t(brand, "journal_entries")} SET status = 'reversed' WHERE entry_id = $1`,
+    [id],
+  );
+  void reversal_entry_id;
+}
+
+/**
+ * Per-account posted debit/credit totals over a date window, with the
+ * account's group classification — the raw material for trial balance,
+ * P&L and balance sheet. Only 'posted' entries count.
+ */
+async function accountActivity({ client, brand, from, to }) {
+  const params = [];
+  const where = ["je.status = 'posted'"];
+  let i = 1;
+  if (from) {
+    where.push(`je.posting_date >= $${i++}`);
+    params.push(from);
+  }
+  if (to) {
+    where.push(`je.posting_date <= $${i++}`);
+    params.push(to);
+  }
+  const { rows } = await ex(client)(
+    `SELECT coa.account_code, coa.account_name, coa.display_order,
+            ag.group_type, ag.normal_balance, ag.statement,
+            COALESCE(SUM(jl.debit_ngn), 0)  AS debit_ngn,
+            COALESCE(SUM(jl.credit_ngn), 0) AS credit_ngn
+       FROM ${t(brand, "journal_lines")} jl
+       JOIN ${t(brand, "journal_entries")} je ON je.entry_id = jl.entry_id
+       JOIN ${t(brand, "chart_of_accounts")} coa ON coa.account_id = jl.account_id
+       JOIN ${t(brand, "account_groups")} ag ON ag.group_id = coa.group_id
+      WHERE ${where.join(" AND ")}
+      GROUP BY coa.account_code, coa.account_name, coa.display_order, ag.group_type, ag.normal_balance, ag.statement
+     HAVING COALESCE(SUM(jl.debit_ngn),0) <> 0 OR COALESCE(SUM(jl.credit_ngn),0) <> 0
+      ORDER BY coa.account_code`,
+    params,
+  );
+  return rows;
+}
+
+module.exports = {
+  listGroups,
+  updateGroup,
+  listAccounts,
+  getAccount,
+  getAccountByCode,
+  createAccount,
+  updateAccount,
+  listPeriods,
+  getPeriod,
+  findActivePeriod,
+  createPeriod,
+  closePeriod,
+  nextEntryNumber,
+  insertEntry,
+  insertLine,
+  setEntryStatus,
+  findEntryById,
+  listEntries,
+  setEntryReversed,
+  accountActivity,
+};

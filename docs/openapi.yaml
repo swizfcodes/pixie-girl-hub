@@ -156,10 +156,19 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: status, in: query, schema: { type: string }, description: "comma-separated status filter" }
+        - {
+            name: status,
+            in: query,
+            schema: { type: string },
+            description: "comma-separated status filter",
+          }
         - { name: q, in: query, schema: { type: string } }
         - { name: page, in: query, schema: { type: integer, default: 1 } }
-        - { name: page_size, in: query, schema: { type: integer, default: 25, maximum: 100 } }
+        - {
+            name: page_size,
+            in: query,
+            schema: { type: integer, default: 25, maximum: 100 },
+          }
       x-required-permission: "sales_campaigns.view"
       x-entity-scope: brand
       x-is-write: false
@@ -171,7 +180,7 @@ paths:
     post:
       summary: Create a campaign (draft)
       tags: [sales_campaigns]
-      parameters: [ { $ref: "#/components/parameters/BrandContext" } ]
+      parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "sales_campaigns.create"
       x-entity-scope: brand
       x-is-write: true
@@ -189,7 +198,12 @@ paths:
   /sales-campaigns/{id}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get a campaign (with products + rollups)
       tags: [sales_campaigns]
@@ -223,7 +237,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.edit"
       x-entity-scope: brand
       x-is-write: true
@@ -237,7 +256,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.approve"
       x-entity-scope: brand
       x-is-write: true
@@ -250,7 +274,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.approve"
       x-entity-scope: brand
       x-is-write: true
@@ -263,7 +292,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.edit"
       x-entity-scope: brand
       x-is-write: true
@@ -272,18 +306,91 @@ paths:
         "409": { description: Not approved / wrong state }
 
   /sales-campaigns/{id}/pause:
-    post: { summary: Pause a live campaign, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.edit", x-is-write: true, responses: { "200": { description: Paused } } }
+    post:
+      {
+        summary: Pause a live campaign,
+        tags: [sales_campaigns],
+        parameters:
+          [
+            { $ref: "#/components/parameters/BrandContext" },
+            {
+              name: id,
+              in: path,
+              required: true,
+              schema: { type: string, format: uuid },
+            },
+          ],
+        x-required-permission: "sales_campaigns.edit",
+        x-is-write: true,
+        responses: { "200": { description: Paused } },
+      }
   /sales-campaigns/{id}/resume:
-    post: { summary: Resume a paused campaign, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.edit", x-is-write: true, responses: { "200": { description: Live } } }
+    post:
+      {
+        summary: Resume a paused campaign,
+        tags: [sales_campaigns],
+        parameters:
+          [
+            { $ref: "#/components/parameters/BrandContext" },
+            {
+              name: id,
+              in: path,
+              required: true,
+              schema: { type: string, format: uuid },
+            },
+          ],
+        x-required-permission: "sales_campaigns.edit",
+        x-is-write: true,
+        responses: { "200": { description: Live } },
+      }
   /sales-campaigns/{id}/end:
-    post: { summary: End a campaign early, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.edit", x-is-write: true, responses: { "200": { description: Ended } } }
+    post:
+      {
+        summary: End a campaign early,
+        tags: [sales_campaigns],
+        parameters:
+          [
+            { $ref: "#/components/parameters/BrandContext" },
+            {
+              name: id,
+              in: path,
+              required: true,
+              schema: { type: string, format: uuid },
+            },
+          ],
+        x-required-permission: "sales_campaigns.edit",
+        x-is-write: true,
+        responses: { "200": { description: Ended } },
+      }
   /sales-campaigns/{id}/duplicate:
-    post: { summary: Clone a campaign into a new draft, tags: [sales_campaigns], parameters: [ { $ref: "#/components/parameters/BrandContext" }, { name: id, in: path, required: true, schema: { type: string, format: uuid } } ], x-required-permission: "sales_campaigns.create", x-is-write: true, responses: { "201": { description: New draft } } }
+    post:
+      {
+        summary: Clone a campaign into a new draft,
+        tags: [sales_campaigns],
+        parameters:
+          [
+            { $ref: "#/components/parameters/BrandContext" },
+            {
+              name: id,
+              in: path,
+              required: true,
+              schema: { type: string, format: uuid },
+            },
+          ],
+        x-required-permission: "sales_campaigns.create",
+        x-is-write: true,
+        responses: { "201": { description: New draft } },
+      }
 
   /sales-campaigns/{id}/products:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: List campaign products (include/exclude)
       tags: [sales_campaigns]
@@ -299,8 +406,18 @@ paths:
   /sales-campaigns/{id}/products/{linkId}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-      - { name: linkId, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
+      - {
+          name: linkId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     patch:
       summary: Update a campaign product link
       tags: [sales_campaigns]
@@ -317,7 +434,12 @@ paths:
   /sales-campaigns/{id}/landing:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get landing-page config
       tags: [sales_campaigns]
@@ -336,8 +458,17 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: state, in: query, schema: { type: string, enum: [before, live, ended] } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: state,
+            in: query,
+            schema: { type: string, enum: [before, live, ended] },
+          }
       x-required-permission: "sales_campaigns.view"
       responses: { "200": { description: Landing payload } }
 
@@ -347,7 +478,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.view"
       responses: { "200": { description: Share kit } }
 
@@ -357,7 +493,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.view"
       responses: { "200": { description: Signups page } }
 
@@ -367,7 +508,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "sales_campaigns.view"
       responses: { "200": { description: Metrics } }
 
@@ -377,7 +523,12 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
         - { name: from, in: query, schema: { type: string, format: date } }
         - { name: to, in: query, schema: { type: string, format: date } }
       x-required-permission: "sales_campaigns.view"
@@ -389,8 +540,17 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: format, in: query, schema: { type: string, enum: [json, pdf] } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: format,
+            in: query,
+            schema: { type: string, enum: [json, pdf] },
+          }
       x-required-permission: "sales_campaigns.view"
       responses: { "200": { description: Report } }
 

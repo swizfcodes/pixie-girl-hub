@@ -1,0 +1,256 @@
+/**
+ * Contacts (V2.2 §6.12) — business logic. Contacts are global; segments
+ * are brand-scoped. Emits events consumed by CRM / Sales / Smartcomm.
+ */
+
+"use strict";
+
+const repo = require("./contacts.repo");
+const events = require("./contacts.events");
+const { audit } = require("../../middleware/audit");
+const { transaction } = require("../../config/database");
+const { NotFoundError } = require("../../utils/errors");
+
+const A = (
+  brand,
+  user_id,
+  action_key,
+  target_type,
+  target_id,
+  after,
+  request_id,
+  before,
+) =>
+  audit({
+    business: brand,
+    user_id,
+    action_key,
+    target_type,
+    target_id,
+    before,
+    after,
+    request_id,
+  });
+
+// ── Contacts ─────────────────────────────────────────────
+function list({ filters, page, page_size }) {
+  const offset = (page - 1) * page_size;
+  return repo.findAll({ filters, page, page_size, offset });
+}
+async function getById({ id }) {
+  const c = await repo.findById({ id });
+  if (!c) throw new NotFoundError("Contact");
+  return c;
+}
+async function create({ brand, user, request_id, input }) {
+  return transaction(async (client) => {
+    const c = await repo.create({ client, input, user_id: user.user_id });
+    await A(
+      brand,
+      user.user_id,
+      "contacts.create",
+      "contact",
+      c.contact_id,
+      c,
+      request_id,
+    );
+    events.emit("created", { brand, id: c.contact_id });
+    return c;
+  });
+}
+async function update({ brand, user, request_id, id, patch }) {
+  const before = await repo.findById({ id });
+  if (!before) throw new NotFoundError("Contact");
+  const c = await repo.update({ id, patch });
+  await A(
+    brand,
+    user.user_id,
+    "contacts.update",
+    "contact",
+    id,
+    c,
+    request_id,
+    before,
+  );
+  events.emit("updated", { brand, id });
+  return c;
+}
+async function remove({ brand, user, request_id, id }) {
+  const ok = await repo.softDelete({ id });
+  if (!ok) throw new NotFoundError("Contact");
+  await A(
+    brand,
+    user.user_id,
+    "contacts.delete",
+    "contact",
+    id,
+    null,
+    request_id,
+  );
+  events.emit("deleted", { brand, id });
+}
+
+// ── Segments ─────────────────────────────────────────────
+const listSegments = ({ brand }) => repo.listSegments({ brand });
+async function getSegment({ brand, id }) {
+  const s = await repo.getSegment({ brand, id });
+  if (!s) throw new NotFoundError("Segment");
+  return s;
+}
+async function createSegment({ brand, user, request_id, input }) {
+  const s = await repo.createSegment({ brand, input, user_id: user.user_id });
+  await A(
+    brand,
+    user.user_id,
+    "contacts.segment.create",
+    "contact_segment",
+    s.segment_id,
+    s,
+    request_id,
+  );
+  return s;
+}
+async function updateSegment({ brand, user, request_id, id, patch }) {
+  const before = await repo.getSegment({ brand, id });
+  if (!before) throw new NotFoundError("Segment");
+  const s = await repo.updateSegment({ brand, id, patch });
+  await A(
+    brand,
+    user.user_id,
+    "contacts.segment.update",
+    "contact_segment",
+    id,
+    s,
+    request_id,
+    before,
+  );
+  return s;
+}
+async function deleteSegment({ brand, user, request_id, id }) {
+  const ok = await repo.deleteSegment({ brand, id });
+  if (!ok) throw new NotFoundError("Segment");
+  await A(
+    brand,
+    user.user_id,
+    "contacts.segment.delete",
+    "contact_segment",
+    id,
+    null,
+    request_id,
+  );
+}
+
+// ── Addresses (under a contact) ──────────────────────────
+async function ensureContact({ id }) {
+  const c = await repo.findById({ id });
+  if (!c) throw new NotFoundError("Contact");
+  return c;
+}
+async function listAddresses({ id }) {
+  await ensureContact({ id });
+  return repo.listAddresses({ contact_id: id });
+}
+async function addAddress({ brand, user, request_id, id, input }) {
+  await ensureContact({ id });
+  return transaction(async (client) => {
+    if (input.is_default) {
+      await repo.clearDefaultAddresses({
+        client,
+        contact_id: id,
+        address_type: input.address_type || "delivery",
+      });
+    }
+    const addr = await repo.addAddress({
+      client,
+      contact_id: id,
+      input,
+      user_id: user.user_id,
+    });
+    await A(
+      brand,
+      user.user_id,
+      "contacts.address.add",
+      "contact_address",
+      addr.address_id,
+      addr,
+      request_id,
+    );
+    events.emit("address.added", {
+      brand,
+      contact_id: id,
+      address_id: addr.address_id,
+    });
+    return addr;
+  });
+}
+async function updateAddress({
+  brand,
+  user,
+  request_id,
+  id,
+  address_id,
+  patch,
+}) {
+  return transaction(async (client) => {
+    const before = await repo.getAddress({
+      client,
+      contact_id: id,
+      address_id,
+    });
+    if (!before) throw new NotFoundError("Address");
+    if (patch.is_default) {
+      await repo.clearDefaultAddresses({
+        client,
+        contact_id: id,
+        address_type: patch.address_type || before.address_type,
+      });
+    }
+    const addr = await repo.updateAddress({
+      client,
+      contact_id: id,
+      address_id,
+      patch,
+    });
+    await A(
+      brand,
+      user.user_id,
+      "contacts.address.update",
+      "contact_address",
+      address_id,
+      addr,
+      request_id,
+      before,
+    );
+    return addr;
+  });
+}
+async function deleteAddress({ brand, user, request_id, id, address_id }) {
+  const ok = await repo.deleteAddress({ contact_id: id, address_id });
+  if (!ok) throw new NotFoundError("Address");
+  await A(
+    brand,
+    user.user_id,
+    "contacts.address.delete",
+    "contact_address",
+    address_id,
+    null,
+    request_id,
+  );
+}
+
+module.exports = {
+  list,
+  getById,
+  create,
+  update,
+  remove,
+  listSegments,
+  getSegment,
+  createSegment,
+  updateSegment,
+  deleteSegment,
+  listAddresses,
+  addAddress,
+  updateAddress,
+  deleteAddress,
+};

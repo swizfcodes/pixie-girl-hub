@@ -286,7 +286,8 @@ async function updateProduct({ client, brand, campaign_id, link_id, patch }) {
     sets.push(`${col} = $${i++}`);
     params.push(patch[col]);
   }
-  if (!sets.length) return findProductLink({ client, brand, campaign_id, link_id });
+  if (!sets.length)
+    return findProductLink({ client, brand, campaign_id, link_id });
   params.push(link_id, campaign_id);
   const { rows } = await exec(client)(
     `UPDATE ${t(brand, "sales_campaign_products")} SET ${sets.join(", ")}
@@ -320,7 +321,15 @@ async function findSignup({ client, brand, campaign_id, email, phone }) {
   return rows[0] || null;
 }
 
-async function createSignup({ client, brand, campaign_id, input, contact_id, ip, user_agent }) {
+async function createSignup({
+  client,
+  brand,
+  campaign_id,
+  input,
+  contact_id,
+  ip,
+  user_agent,
+}) {
   const { rows } = await exec(client)(
     `INSERT INTO ${t(brand, "sales_campaign_signups")}
        (campaign_id, contact_id, email, phone, notify_via, source, ip_address, user_agent)
@@ -340,7 +349,14 @@ async function createSignup({ client, brand, campaign_id, input, contact_id, ip,
   return rows[0];
 }
 
-async function listSignups({ client, brand, campaign_id, page = 1, page_size = 25, offset = 0 }) {
+async function listSignups({
+  client,
+  brand,
+  campaign_id,
+  page = 1,
+  page_size = 25,
+  offset = 0,
+}) {
   const run = exec(client);
   const { rows: c } = await run(
     `SELECT COUNT(*)::int AS total FROM ${t(brand, "sales_campaign_signups")} WHERE campaign_id = $1`,
@@ -355,7 +371,12 @@ async function listSignups({ client, brand, campaign_id, page = 1, page_size = 2
   );
   return {
     data: rows,
-    meta: { page, page_size, total: c[0].total, has_more: offset + rows.length < c[0].total },
+    meta: {
+      page,
+      page_size,
+      total: c[0].total,
+      has_more: offset + rows.length < c[0].total,
+    },
   };
 }
 

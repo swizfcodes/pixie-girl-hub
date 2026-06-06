@@ -1,15 +1,5 @@
 /**
- * Stock SSOT (V2.2 §6.9)
- * Domain events emitted by the service layer.
- *
- * These feed:
- *   - Socket.io real-time updates (via realtime/handlers)
- *   - Audit log (already written separately, but events get extra context)
- *   - AI Insights triggers
- *   - Workflow engine (some events open workflow instances)
- *
- * Use a simple emitter — keep payloads small (just IDs + brand), let
- * subscribers re-query if they need the full record.
+ * Stock (V2.2 §6.9) — domain events. `stock.moved` feeds realtime + low-stock.
  */
 
 "use strict";
@@ -21,15 +11,13 @@ const emitter = new EventEmitter();
 emitter.setMaxListeners(50);
 
 function emit(eventType, payload) {
-  const fullType = `stock.${eventType}`;
   try {
-    emitter.emit(fullType, payload);
-    emitter.emit("*", { type: fullType, payload });
+    emitter.emit(`stock.${eventType}`, payload);
+    emitter.emit("*", { type: `stock.${eventType}`, payload });
   } catch (err) {
-    logger.error({ err, eventType: fullType }, "stock event emit failed");
+    logger.error({ err, eventType }, "stock event emit failed");
   }
 }
-
 function on(eventType, handler) {
   emitter.on(`stock.${eventType}`, handler);
 }

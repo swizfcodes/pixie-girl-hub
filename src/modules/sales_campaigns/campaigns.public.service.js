@@ -38,8 +38,15 @@ async function getLanding({ slug, brandHint }) {
     throw new NotFoundError("Campaign");
   }
   const { campaign, brand } = found;
-  const products = await repo.listProducts({ brand, campaign_id: campaign.campaign_id });
-  return main.buildLandingPayload(campaign, products, main.resolveState(campaign));
+  const products = await repo.listProducts({
+    brand,
+    campaign_id: campaign.campaign_id,
+  });
+  return main.buildLandingPayload(
+    campaign,
+    products,
+    main.resolveState(campaign),
+  );
 }
 
 async function getStock({ slug, brandHint }) {
@@ -48,7 +55,10 @@ async function getStock({ slug, brandHint }) {
     throw new NotFoundError("Campaign");
   }
   const { campaign, brand } = found;
-  const products = await repo.listProducts({ brand, campaign_id: campaign.campaign_id });
+  const products = await repo.listProducts({
+    brand,
+    campaign_id: campaign.campaign_id,
+  });
   return products
     .filter((p) => p.include_exclude !== "exclude" && p.product_id)
     .map((p) => ({
@@ -67,7 +77,11 @@ async function signup({ slug, brandHint, input, ip, user_agent }) {
     throw new AppError("CAMPAIGN_ENDED", "This campaign has ended", 409);
   }
   if (!campaign.signup_for_notifications) {
-    throw new AppError("SIGNUPS_DISABLED", "Notifications are not enabled for this campaign", 409);
+    throw new AppError(
+      "SIGNUPS_DISABLED",
+      "Notifications are not enabled for this campaign",
+      409,
+    );
   }
 
   return transaction(async (client) => {
@@ -95,7 +109,11 @@ async function signup({ slug, brandHint, input, ip, user_agent }) {
       id: campaign.campaign_id,
       deltas: { total_signups: 1 },
     });
-    events.emit("signup_received", { brand, id: campaign.campaign_id, signup_id: created.signup_id });
+    events.emit("signup_received", {
+      brand,
+      id: campaign.campaign_id,
+      signup_id: created.signup_id,
+    });
     return { already_signed_up: false, signup_id: created.signup_id };
   });
 }

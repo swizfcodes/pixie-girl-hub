@@ -1,11 +1,6 @@
 /**
- * Invoicing & Billing (V2.2 §6.5)
- *
- * Module: invoicing
- * Permission key: invoicing
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   invoices, invoice_lines, invoice_payments, credit_notes, receipts, invoice_reminders
+ * Invoicing & Billing (V2.2 §6.5) — routes. Mounted at /api/v1/invoicing.
+ * Permission key: invoicing.
  */
 
 "use strict";
@@ -15,37 +10,56 @@ const controller = require("./invoicing.controller");
 const validator = require("./invoicing.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
+// Side-effect: register the sales.order.paid → auto-invoice subscriber.
+require("./invoicing.subscribers");
+
 const router = express.Router();
+const can = (action) => requirePermission("invoicing", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("invoicing", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get("/:id", requirePermission("invoicing", "view"), controller.getById);
-
-// ── POST /            create ───────────────────────────────
+router.get("/invoices", can("view"), controller.listInvoices);
 router.post(
-  "/",
-  requirePermission("invoicing", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/invoices",
+  can("create"),
+  validator.validateInvoiceCreate,
+  controller.createInvoice,
+);
+router.get("/invoices/:id", can("view"), controller.getById);
+router.post(
+  "/invoices/:id/send",
+  can("edit"),
+  validator.validateInvoiceSend,
+  controller.sendInvoice,
+);
+router.post(
+  "/invoices/:id/payments",
+  can("edit"),
+  validator.validatePaymentApply,
+  controller.recordPayment,
+);
+router.post("/invoices/:id/void", can("delete"), controller.voidInvoice);
+router.get("/invoices/:id/receipts", can("view"), controller.listReceipts);
+
+// Credit notes
+router.get("/credit-notes", can("view"), controller.listCreditNotes);
+router.post(
+  "/credit-notes",
+  can("create"),
+  validator.validateCreditNoteCreate,
+  controller.createCreditNote,
+);
+router.get("/credit-notes/:cnId", can("view"), controller.getCreditNote);
+router.post(
+  "/credit-notes/:cnId/issue",
+  can("approve"),
+  controller.issueCreditNote,
 );
 
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("invoicing", "edit"),
-  validator.validateUpdate,
-  controller.update,
+// Receipts
+router.post(
+  "/receipts",
+  can("create"),
+  validator.validateReceiptIssue,
+  controller.issueReceipt,
 );
-
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("invoicing", "delete"),
-  controller.archive,
-);
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
 
 module.exports = router;

@@ -1,15 +1,5 @@
 /**
- * Invoicing & Billing (V2.2 §6.5)
- * Domain events emitted by the service layer.
- *
- * These feed:
- *   - Socket.io real-time updates (via realtime/handlers)
- *   - Audit log (already written separately, but events get extra context)
- *   - AI Insights triggers
- *   - Workflow engine (some events open workflow instances)
- *
- * Use a simple emitter — keep payloads small (just IDs + brand), let
- * subscribers re-query if they need the full record.
+ * Invoicing & Billing (V2.2 §6.5) — domain events.
  */
 
 "use strict";
@@ -21,15 +11,13 @@ const emitter = new EventEmitter();
 emitter.setMaxListeners(50);
 
 function emit(eventType, payload) {
-  const fullType = `invoicing.${eventType}`;
   try {
-    emitter.emit(fullType, payload);
-    emitter.emit("*", { type: fullType, payload });
+    emitter.emit(`invoicing.${eventType}`, payload);
+    emitter.emit("*", { type: `invoicing.${eventType}`, payload });
   } catch (err) {
-    logger.error({ err, eventType: fullType }, "invoicing event emit failed");
+    logger.error({ err, eventType }, "invoicing event emit failed");
   }
 }
-
 function on(eventType, handler) {
   emitter.on(`invoicing.${eventType}`, handler);
 }

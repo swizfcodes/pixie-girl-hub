@@ -1,47 +1,78 @@
 /**
- * Sales & Quotations + Installment Payments (V2.2 §6.2)
- *
- * Module: sales
- * Permission key: sales
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   sales_orders, sales_order_lines, sales_order_payments, quotations, cancellation_requests
+ * Sales (V2.2 §6.2) — routes. Mounted at /api/v1/sales. Permission key: sales.
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./sales.controller");
-const validator = require("./sales.validator");
+const c = require("./sales.controller");
+const v = require("./sales.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
 const router = express.Router();
+const can = (a) => requirePermission("sales", a);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("sales", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get("/:id", requirePermission("sales", "view"), controller.getById);
-
-// ── POST /            create ───────────────────────────────
+router.get("/orders", can("view"), c.listOrders);
+router.post("/orders", can("create"), v.validateOrderCreate, c.createOrder);
+router.get("/orders/:id", can("view"), c.getById);
+router.patch("/orders/:id", can("edit"), v.validateOrderUpdate, c.updateOrder);
 router.post(
-  "/",
-  requirePermission("sales", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/orders/:id/payments",
+  can("edit"),
+  v.validatePaymentCreate,
+  c.addPayment,
+);
+router.post("/orders/:id/cancel", can("edit"), c.cancelOrder);
+
+// Quotations
+router.get("/quotations", can("view"), c.listQuotations);
+router.post(
+  "/quotations",
+  can("create"),
+  v.validateQuotationCreate,
+  c.createQuotation,
+);
+router.get("/quotations/:quoId", can("view"), c.getQuotation);
+router.post(
+  "/quotations/:quoId/send",
+  can("edit"),
+  v.validateQuotationSend,
+  c.sendQuotation,
+);
+router.post("/quotations/:quoId/accept", can("edit"), c.acceptQuotation);
+router.post(
+  "/quotations/:quoId/reject",
+  can("edit"),
+  v.validateQuotationReject,
+  c.rejectQuotation,
+);
+router.post(
+  "/quotations/:quoId/convert",
+  can("create"),
+  v.validateQuotationConvert,
+  c.convertQuotation,
 );
 
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("sales", "edit"),
-  validator.validateUpdate,
-  controller.update,
+// Cancellation requests (§6.4 cancellation timer)
+router.post(
+  "/orders/:id/cancellation",
+  can("edit"),
+  v.validateCancellationRequest,
+  c.requestCancellation,
 );
-
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete("/:id", requirePermission("sales", "delete"), controller.archive);
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+router.get("/cancellations", can("view"), c.listCancellations);
+router.get("/cancellations/:reqId", can("view"), c.getCancellation);
+router.post(
+  "/cancellations/:reqId/approve",
+  can("approve"),
+  v.validateCancellationReview,
+  c.approveCancellation,
+);
+router.post(
+  "/cancellations/:reqId/reject",
+  can("approve"),
+  v.validateCancellationReview,
+  c.rejectCancellation,
+);
 
 module.exports = router;

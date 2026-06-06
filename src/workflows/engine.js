@@ -4,28 +4,34 @@
  * Data-driven approval routing. Definitions live in
  * shared.workflow_definitions (JSONB stages); running state in
  * shared.workflow_instances; the per-approver log in
- * shared.workflow_decisions. No compiled matrix — the engine reads the
- * definition at request time.
+ * shared.workflow_decisions. The engine reads the definition at request
+ * time — no compiled matrix, no code change to reroute an approval.
  *
- * Public API (all accept an optional `client` to run inside a caller's tx):
+ * Routing is THRESHOLD-AWARE (see conditions.js): each stage carries a
+ * condition evaluated against the instance context, so a ₦150k expense
+ * routes to the manager tier and a ₦250k expense routes straight to the CEO
+ * tier. Non-applicable stages are skipped, not run.
+ *
+ * Public API (each accepts an optional `client` to join a caller's tx):
  *   - findDefinition({ business, trigger_module, trigger_action })
+ *   - requiresApproval({ business, trigger_module, trigger_action, context })
+ *       → false when no stage applies (caller can skip the instance).
  *   - openInstance({ business, trigger_module, trigger_action,
  *                    reference_table, reference_id, opened_by, context })
- *       → inserts an instance at stage 1 (status 'pending'); lazily
- *         creates a default definition if the brand has none, so the
- *         module is usable before Module 6.27's builder UI exists.
+ *       → opens at the first APPLICABLE stage; if none apply, the instance
+ *         is created already 'approved' and workflow.completed fires, so the
+ *         module's "auto-approved below threshold" path is uniform.
  *   - findOpenInstance({ business, reference_table, reference_id })
- *   - act({ instance_id, user, action: 'approve'|'reject', notes })
- *       → records the decision, advances or terminates, returns the
- *         updated instance ({ status, current_stage, ... }).
+ *   - act({ instance_id, user, action:'approve'|'reject'|'request_changes', notes })
+ *       → records the decision, advances to the next applicable stage,
+ *         terminates, or (request_changes) sends back to the first stage.
+ *   - resolveTimeout({ instance_id })   — applies a stage's on_timeout policy
  *   - resolveApprover({ business, stage, current_position_id })
- *       → best-effort "who should approve" for notifications, honouring
- *         deputy fallback and CEO escalation.
  *
- * Authority rule: a stage approver of {type:'role', value:'ceo'} requires
- * the acting user to be the CEO. Any other approver type trusts that the
- * calling route already enforced the module's `approve` RBAC grant (the
- * engine never widens access — it only narrows for the CEO-only case).
+ * Authority rule: the acting user must hold one of the stage's approver
+ * roles (the `owner`/CEO holder may act on any stage). 'position' approvers
+ * trust the route's `org_workflow.approve` RBAC grant; 'user' approvers must
+ * match the acting user. The engine never widens access.
  */
 
 "use strict";
@@ -33,59 +39,77 @@
 const { EventEmitter } = require("events");
 const { query, transaction } = require("../config/database");
 const { AppError } = require("../utils/errors");
+const cond = require("./conditions");
+const defaults = require("./default-definitions");
 
 const emitter = new EventEmitter();
 emitter.setMaxListeners(50);
 
-// Built-in defaults used when a brand has no authored definition yet.
-const DEFAULT_SPECS = {
-  "sales_campaigns:submit": {
-    name: "Campaign Approval (default)",
-    description: "Default single-stage CEO approval for sales campaigns.",
-    definition: {
-      trigger: { module: "sales_campaigns", action: "submit" },
-      stages: [
-        {
-          order: 1,
-          approvers: [{ type: "role", value: "ceo" }],
-          timeout_hours: 48,
-          on_timeout: "escalate",
-          fallback_to_deputy: true,
-        },
-      ],
-    },
-  },
-};
+const VALID_ACTIONS = new Set(["approve", "reject", "request_changes"]);
 
 function execFor(client) {
   return client ? client.query.bind(client) : query;
 }
 
+// Re-export the pure normaliser so callers/tests keep one entry point.
+const normaliseStages = cond.normaliseStages;
+
+// ── Role-name → role_id resolution (system roles are static; cache them) ──
+const roleIdCache = new Map(); // role_name → role_id
+async function roleIdsForNames(exec, names) {
+  const wanted = [...new Set(names)].filter(Boolean);
+  const missing = wanted.filter((n) => !roleIdCache.has(n));
+  if (missing.length) {
+    const { rows } = await exec(
+      `SELECT role_id, role_name FROM shared.roles WHERE role_name = ANY($1::text[])`,
+      [missing],
+    );
+    for (const r of rows) roleIdCache.set(r.role_name, r.role_id);
+  }
+  return wanted.map((n) => roleIdCache.get(n)).filter(Boolean);
+}
+
 /**
- * Normalise a definition's stages to a stable internal shape regardless
- * of whether they were authored in the rich §6.27 form or the simpler
- * WORKFLOWS.md form.
+ * May this user act on this (already-applicable) stage?
+ *   - owner / CEO: any stage.
+ *   - 'user' approver: must match the acting user.
+ *   - 'role' approver: the user must hold that role. 'ceo'/'owner' role values
+ *     are CEO-only (only the owner-role holder passes, handled up top).
+ *   - 'position' approver: trusted to the route's approve grant (best-effort).
+ *   - no role/user constraints at all: allowed (route already gated it).
  */
-function normaliseStages(definition) {
-  const raw = (definition && definition.stages) || [];
-  return raw
-    .map((s, idx) => {
-      const approvers =
-        s.approvers ||
-        (s.approver_role
-          ? [{ type: "role", value: s.approver_role }]
-          : [{ type: "role", value: "ceo" }]);
-      return {
-        order: s.order || s.step || idx + 1,
-        approvers,
-        amount_threshold_ngn:
-          s.amount_threshold_ngn ?? s.threshold_ngn_lte ?? null,
-        timeout_hours: s.timeout_hours ?? 48,
-        on_timeout: s.on_timeout || "escalate",
-        fallback_to_deputy: s.fallback_to_deputy === true,
-      };
-    })
-    .sort((a, b) => a.order - b.order);
+async function userCanActOnStage(exec, stage, user) {
+  if (user && user.is_ceo) return true;
+  const approvers = stage.approvers || [];
+  const userId = user && user.user_id;
+
+  if (approvers.some((a) => a.type === "user" && a.value === userId)) {
+    return true;
+  }
+
+  const roleValues = approvers
+    .filter((a) => a.type === "role")
+    .map((a) => a.value);
+
+  if (roleValues.length) {
+    const ceoOnly = roleValues.filter((v) => v === "ceo" || v === "owner");
+    const otherRoles = roleValues.filter((v) => v !== "ceo" && v !== "owner");
+    // CEO-only stage with no alternative role → non-CEO cannot act.
+    if (ceoOnly.length && otherRoles.length === 0) return false;
+    if (otherRoles.length) {
+      const ids = await roleIdsForNames(exec, otherRoles);
+      const held = user && Array.isArray(user.role_ids) ? user.role_ids : [];
+      if (held.some((rid) => ids.includes(rid))) return true;
+    }
+    // Listed roles but the user holds none of them.
+    if (!approvers.some((a) => a.type === "position")) return false;
+  }
+
+  // Position-based approval: trust the route-level approve grant.
+  if (approvers.some((a) => a.type === "position")) return true;
+
+  // No role/user/position constraints → route RBAC is the only gate.
+  return roleValues.length === 0;
 }
 
 async function findDefinition({
@@ -106,7 +130,7 @@ async function findDefinition({
   return rows[0] || null;
 }
 
-/** Lazily create the built-in default definition for a trigger. */
+/** Lazily create the canonical definition for a trigger if the brand has none. */
 async function ensureDefaultDefinition({
   client,
   business,
@@ -122,7 +146,7 @@ async function ensureDefaultDefinition({
   });
   if (existing) return existing;
 
-  const spec = DEFAULT_SPECS[`${trigger_module}:${trigger_action}`];
+  const spec = defaults.getSpec(trigger_module, trigger_action);
   if (!spec) {
     throw new AppError(
       "WORKFLOW_NOT_CONFIGURED",
@@ -150,6 +174,26 @@ async function ensureDefaultDefinition({
   return rows[0];
 }
 
+async function requiresApproval({
+  client,
+  business,
+  trigger_module,
+  trigger_action,
+  context = {},
+}) {
+  const def = await findDefinition({
+    client,
+    business,
+    trigger_module,
+    trigger_action,
+  });
+  const definition = def
+    ? def.definition
+    : (defaults.getSpec(trigger_module, trigger_action) || {}).definition;
+  if (!definition) return false;
+  return cond.requiresApproval(definition, context);
+}
+
 async function openInstance({
   client,
   business,
@@ -167,25 +211,54 @@ async function openInstance({
     trigger_action,
     opened_by,
   });
-  const stages = normaliseStages(def.definition);
-  const first = stages[0];
-  const timeoutHours = first ? first.timeout_hours : 48;
-
   const exec = execFor(client);
+  const first = cond.firstApplicableStage(def.definition, context);
+
+  // Nothing to approve at this amount → record an auto-approved instance so
+  // the module's completion handler runs through the same path.
+  if (!first) {
+    const parkStage = cond.lastStageOrder(def.definition);
+    const { rows } = await exec(
+      `INSERT INTO shared.workflow_instances
+         (workflow_id, business, reference_table, reference_id, current_stage,
+          status, context, initiated_by, stage_entered_at, completed_at)
+       VALUES ($1, $2, $3, $4, $5, 'approved', $6::jsonb, $7, now(), now())
+       RETURNING *`,
+      [
+        def.workflow_id,
+        business,
+        reference_table,
+        reference_id,
+        parkStage,
+        JSON.stringify(context),
+        opened_by,
+      ],
+    );
+    const instance = rows[0];
+    emitter.emit("workflow.completed", {
+      instance,
+      status: "approved",
+      auto: true,
+    });
+    return instance;
+  }
+
   const { rows } = await exec(
     `INSERT INTO shared.workflow_instances
        (workflow_id, business, reference_table, reference_id, current_stage,
         status, context, initiated_by, stage_entered_at, stage_timeout_at)
-     VALUES ($1, $2, $3, $4, 1, 'pending', $5::jsonb, $6, now(), now() + ($7 || ' hours')::interval)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6::jsonb, $7, now(),
+             now() + ($8 || ' hours')::interval)
      RETURNING *`,
     [
       def.workflow_id,
       business,
       reference_table,
       reference_id,
+      first.order,
       JSON.stringify(context),
       opened_by,
-      String(timeoutHours),
+      String(first.timeout_hours),
     ],
   );
   const instance = rows[0];
@@ -211,19 +284,13 @@ async function findOpenInstance({
   return rows[0] || null;
 }
 
-function userCanActOnStage(stage, user) {
-  if (user && user.is_ceo) return true;
-  // Only the CEO-only constraint is enforced here; other approver types
-  // trust the route's RBAC `approve` gate.
-  const requiresCeo = (stage.approvers || []).some(
-    (a) => a.type === "role" && a.value === "ceo",
-  );
-  return !requiresCeo;
-}
-
 async function act({ client, instance_id, user, action, notes }) {
-  if (!["approve", "reject"].includes(action)) {
-    throw new AppError("INVALID_ACTION", `Unknown workflow action ${action}`, 400);
+  if (!VALID_ACTIONS.has(action)) {
+    throw new AppError(
+      "INVALID_ACTION",
+      `Unknown workflow action ${action}`,
+      400,
+    );
   }
 
   const run = async (c) => {
@@ -233,8 +300,9 @@ async function act({ client, instance_id, user, action, notes }) {
       [instance_id],
     );
     const instance = instRows[0];
-    if (!instance)
+    if (!instance) {
       throw new AppError("NOT_FOUND", "Workflow instance not found", 404);
+    }
     if (instance.status !== "pending") {
       throw new AppError(
         "WORKFLOW_CLOSED",
@@ -247,15 +315,16 @@ async function act({ client, instance_id, user, action, notes }) {
       `SELECT * FROM shared.workflow_definitions WHERE workflow_id = $1`,
       [instance.workflow_id],
     );
-    const stages = normaliseStages(defRows[0] && defRows[0].definition);
-    const stage = stages[instance.current_stage - 1];
-    if (!stage)
+    const definition = defRows[0] && defRows[0].definition;
+    const stage = cond.stageByOrder(definition, instance.current_stage);
+    if (!stage) {
       throw new AppError("WORKFLOW_STAGE_MISSING", "Stage not found", 409);
+    }
 
-    if (!userCanActOnStage(stage, user)) {
+    if (!(await userCanActOnStage(exec, stage, user))) {
       throw new AppError(
         "PERMISSION_DENIED",
-        "This approval stage requires the CEO",
+        "You are not an approver for this stage",
         403,
       );
     }
@@ -264,10 +333,16 @@ async function act({ client, instance_id, user, action, notes }) {
       `INSERT INTO shared.workflow_decisions
          (instance_id, stage_number, decided_by, decision, comments)
        VALUES ($1, $2, $3, $4, $5)`,
-      [instance_id, instance.current_stage, user.user_id, action, notes || null],
+      [
+        instance_id,
+        instance.current_stage,
+        user.user_id,
+        action,
+        notes || null,
+      ],
     );
 
-    let updated;
+    // ── Reject — terminal ──────────────────────────────────────────────
     if (action === "reject") {
       const r = await exec(
         `UPDATE shared.workflow_instances
@@ -275,65 +350,198 @@ async function act({ client, instance_id, user, action, notes }) {
           WHERE instance_id = $1 RETURNING *`,
         [instance_id],
       );
-      updated = r.rows[0];
       emitter.emit("workflow.completed", {
-        instance: updated,
+        instance: r.rows[0],
         status: "rejected",
       });
-      return updated;
+      return r.rows[0];
     }
 
-    // approve
-    const isFinal = instance.current_stage >= stages.length;
-    if (isFinal) {
+    // ── Request changes — send back to the first applicable stage ──────
+    if (action === "request_changes") {
+      const first = cond.firstApplicableStage(definition, instance.context);
+      const backTo = first ? first.order : instance.current_stage;
+      const timeout = first ? first.timeout_hours : stage.timeout_hours;
+      const r = await exec(
+        `UPDATE shared.workflow_instances
+            SET current_stage = $2,
+                stage_entered_at = now(),
+                stage_timeout_at = now() + ($3 || ' hours')::interval
+          WHERE instance_id = $1 RETURNING *`,
+        [instance_id, backTo, String(timeout)],
+      );
+      emitter.emit("workflow.changes_requested", {
+        instance: r.rows[0],
+        requested_by: user.user_id,
+        notes: notes || null,
+      });
+      return r.rows[0];
+    }
+
+    // ── Approve — advance to next applicable stage, or complete ────────
+    const next = cond.nextApplicableStage(
+      definition,
+      instance.context,
+      instance.current_stage,
+    );
+    if (!next) {
       const r = await exec(
         `UPDATE shared.workflow_instances
             SET status = 'approved', completed_at = now()
           WHERE instance_id = $1 RETURNING *`,
         [instance_id],
       );
-      updated = r.rows[0];
       emitter.emit("workflow.completed", {
-        instance: updated,
+        instance: r.rows[0],
         status: "approved",
       });
-    } else {
-      const next = stages[instance.current_stage]; // next stage (0-indexed)
-      const r = await exec(
-        `UPDATE shared.workflow_instances
-            SET current_stage = current_stage + 1,
-                stage_entered_at = now(),
-                stage_timeout_at = now() + ($2 || ' hours')::interval
-          WHERE instance_id = $1 RETURNING *`,
-        [instance_id, String(next ? next.timeout_hours : 48)],
-      );
-      updated = r.rows[0];
-      emitter.emit("workflow.advanced", { instance: updated });
+      return r.rows[0];
     }
-    return updated;
+    const r = await exec(
+      `UPDATE shared.workflow_instances
+          SET current_stage = $2,
+              stage_entered_at = now(),
+              stage_timeout_at = now() + ($3 || ' hours')::interval
+        WHERE instance_id = $1 RETURNING *`,
+      [instance_id, next.order, String(next.timeout_hours)],
+    );
+    emitter.emit("workflow.advanced", { instance: r.rows[0] });
+    return r.rows[0];
   };
 
-  // Reuse the caller's tx if provided, else open our own.
   if (client) return run(client);
   return transaction(run);
 }
 
 /**
- * Best-effort resolution of who should approve the current stage, for
- * notification routing. Honours deputy fallback and CEO escalation.
+ * Apply the current stage's on_timeout policy to one overdue instance.
+ * Called by the timeout sweeper (jobs/schedulers/workflow-timeout.js).
+ *   escalate (default) — re-arm the timer and emit workflow.escalated; never
+ *                        auto-approves money.
+ *   auto_approve       — system advances / completes (decision 'timeout_auto').
+ *   auto_reject        — system rejects (status 'timeout_rejected').
  */
-async function resolveApprover({ client, business, stage, current_position_id }) {
+async function resolveTimeout({ client, instance_id }) {
+  const run = async (c) => {
+    const exec = c.query.bind(c);
+    const { rows: instRows } = await exec(
+      `SELECT * FROM shared.workflow_instances
+        WHERE instance_id = $1 AND status = 'pending' FOR UPDATE`,
+      [instance_id],
+    );
+    const instance = instRows[0];
+    if (!instance) return null; // already resolved by someone else
+
+    const { rows: defRows } = await exec(
+      `SELECT * FROM shared.workflow_definitions WHERE workflow_id = $1`,
+      [instance.workflow_id],
+    );
+    const definition = defRows[0] && defRows[0].definition;
+    const stage = cond.stageByOrder(definition, instance.current_stage);
+    const policy = (stage && stage.on_timeout) || "escalate";
+
+    if (policy === "escalate") {
+      const hours = stage ? stage.timeout_hours : 48;
+      const r = await exec(
+        `UPDATE shared.workflow_instances
+            SET stage_timeout_at = now() + ($2 || ' hours')::interval
+          WHERE instance_id = $1 RETURNING *`,
+        [instance_id, String(hours)],
+      );
+      emitter.emit("workflow.escalated", {
+        instance: r.rows[0],
+        stage: instance.current_stage,
+      });
+      return r.rows[0];
+    }
+
+    // Record the automatic decision either way.
+    await exec(
+      `INSERT INTO shared.workflow_decisions
+         (instance_id, stage_number, decided_by, decision, comments)
+       VALUES ($1, $2, NULL, 'timeout_auto', $3)`,
+      [instance_id, instance.current_stage, `on_timeout=${policy}`],
+    );
+
+    if (policy === "auto_reject") {
+      const r = await exec(
+        `UPDATE shared.workflow_instances
+            SET status = 'timeout_rejected', completed_at = now()
+          WHERE instance_id = $1 RETURNING *`,
+        [instance_id],
+      );
+      emitter.emit("workflow.completed", {
+        instance: r.rows[0],
+        status: "timeout_rejected",
+        auto: true,
+      });
+      return r.rows[0];
+    }
+
+    // auto_approve — advance to next applicable stage, else complete.
+    const next = cond.nextApplicableStage(
+      definition,
+      instance.context,
+      instance.current_stage,
+    );
+    if (!next) {
+      const r = await exec(
+        `UPDATE shared.workflow_instances
+            SET status = 'timeout_approved', completed_at = now()
+          WHERE instance_id = $1 RETURNING *`,
+        [instance_id],
+      );
+      emitter.emit("workflow.completed", {
+        instance: r.rows[0],
+        status: "timeout_approved",
+        auto: true,
+      });
+      return r.rows[0];
+    }
+    const r = await exec(
+      `UPDATE shared.workflow_instances
+          SET current_stage = $2,
+              stage_entered_at = now(),
+              stage_timeout_at = now() + ($3 || ' hours')::interval
+        WHERE instance_id = $1 RETURNING *`,
+      [instance_id, next.order, String(next.timeout_hours)],
+    );
+    emitter.emit("workflow.advanced", { instance: r.rows[0], auto: true });
+    return r.rows[0];
+  };
+
+  if (client) return run(client);
+  return transaction(run);
+}
+
+/**
+ * Best-effort "who should approve the current stage" for notification
+ * routing. Honours deputy fallback and CEO escalation. The CEO is the holder
+ * of the `owner` system role (there is no is_ceo column).
+ */
+async function resolveApprover({
+  client,
+  business,
+  stage,
+  current_position_id,
+}) {
   const exec = execFor(client);
   const wantsCeo = (stage.approvers || []).some(
-    (a) => a.type === "role" && a.value === "ceo",
+    (a) => a.type === "role" && (a.value === "ceo" || a.value === "owner"),
   );
 
   const ceoLookup = async () => {
     const { rows } = await exec(
-      `SELECT u.user_id, u.display_name
+      `SELECT u.user_id,
+              COALESCE(c.display_name, split_part(u.email::text, '@', 1)) AS display_name
          FROM shared.users u
-         JOIN shared.user_business_access uba ON uba.user_id = u.user_id
-        WHERE u.is_ceo = true AND uba.business_key = $1 AND u.status = 'active'
+         JOIN shared.user_roles ur ON ur.user_id = u.user_id
+         JOIN shared.roles r       ON r.role_id = ur.role_id AND r.role_name = 'owner'
+         LEFT JOIN shared.staff_profiles sp ON sp.profile_id = u.staff_profile_id
+         LEFT JOIN shared.contacts c        ON c.contact_id = sp.contact_id
+        WHERE u.is_active = true
+          AND $1 = ANY(u.permitted_businesses)
+          AND (ur.expires_at IS NULL OR ur.expires_at > now())
         LIMIT 1`,
       [business],
     );
@@ -374,11 +582,13 @@ function onWorkflowEvent(eventType, handler) {
 
 module.exports = {
   findDefinition,
+  requiresApproval,
   openInstance,
   findOpenInstance,
   act,
+  resolveTimeout,
   resolveApprover,
   onWorkflowEvent,
   emitter,
-  normaliseStages, // exported for tests
+  normaliseStages, // pure re-export for callers/tests
 };
