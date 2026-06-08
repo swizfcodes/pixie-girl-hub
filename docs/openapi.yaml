@@ -142,13 +142,15 @@ components:
         courier_key: { type: string, maxLength: 40 }
         display_name: { type: string, maxLength: 120 }
         description: { type: string }
-        integration_type: { type: string, enum: [manual, api, webhook_only, partner_portal] }
+        integration_type:
+          { type: string, enum: [manual, api, webhook_only, partner_portal] }
         api_endpoint: { type: string }
         webhook_secret: { type: string }
         serves_local: { type: boolean }
         serves_nationwide: { type: boolean }
         serves_international: { type: boolean }
-        service_countries: { type: array, items: { type: string, maxLength: 3 } }
+        service_countries:
+          { type: array, items: { type: string, maxLength: 3 } }
         rate_card: { type: object, additionalProperties: true }
         supports_pod: { type: boolean }
         pod_fee_pct: { type: number, minimum: 0, maximum: 100 }
@@ -160,7 +162,8 @@ components:
       properties:
         display_name: { type: string }
         description: { type: string }
-        integration_type: { type: string, enum: [manual, api, webhook_only, partner_portal] }
+        integration_type:
+          { type: string, enum: [manual, api, webhook_only, partner_portal] }
         api_endpoint: { type: string }
         webhook_secret: { type: string }
         serves_local: { type: boolean }
@@ -192,7 +195,16 @@ components:
         order_id: { type: string, format: uuid }
         delivery_type:
           type: string
-          enum: [sales_order, intercompany_transfer, stock_transfer, supplier_return, partner_consignment, sample, other]
+          enum:
+            [
+              sales_order,
+              intercompany_transfer,
+              stock_transfer,
+              supplier_return,
+              partner_consignment,
+              sample,
+              other,
+            ]
         reference_type: { type: string }
         reference_id: { type: string, format: uuid }
         courier_id: { type: string, format: uuid }
@@ -211,7 +223,8 @@ components:
         weight_g: { type: integer }
         package_count: { type: integer, minimum: 1 }
         declared_value_ngn: { type: number, minimum: 0 }
-        items: { type: array, items: { $ref: "#/components/schemas/DeliveryItem" } }
+        items:
+          { type: array, items: { $ref: "#/components/schemas/DeliveryItem" } }
     DeliveryBook:
       type: object
       properties:
@@ -224,9 +237,23 @@ components:
       properties:
         to_status:
           type: string
-          enum: [picked_up, in_transit, arrived_destination_city, out_for_delivery, delivered, returned_to_sender, lost, damaged]
+          enum:
+            [
+              picked_up,
+              in_transit,
+              arrived_destination_city,
+              out_for_delivery,
+              delivered,
+              returned_to_sender,
+              lost,
+              damaged,
+            ]
         notes: { type: string }
-        source: { type: string, enum: [user, system, webhook, customer, courier_portal] }
+        source:
+          {
+            type: string,
+            enum: [user, system, webhook, customer, courier_portal],
+          }
     DeliveryCancel:
       type: object
       properties:
@@ -238,7 +265,18 @@ components:
         attempted_at: { type: string, format: date-time }
         outcome:
           type: string
-          enum: [delivered, recipient_unavailable, address_wrong, recipient_refused, locked_premises, rescheduled, lost_in_transit, damaged, other_failure]
+          enum:
+            [
+              delivered,
+              recipient_unavailable,
+              address_wrong,
+              recipient_refused,
+              locked_premises,
+              rescheduled,
+              lost_in_transit,
+              damaged,
+              other_failure,
+            ]
         outcome_notes: { type: string }
         rider_name: { type: string }
         rider_phone: { type: string }
@@ -249,7 +287,18 @@ components:
       type: object
       required: [proof_type]
       properties:
-        proof_type: { type: string, enum: [photo_at_door, signature, recipient_id_photo, sms_otp_confirmed, call_confirmed] }
+        proof_type:
+          {
+            type: string,
+            enum:
+              [
+                photo_at_door,
+                signature,
+                recipient_id_photo,
+                sms_otp_confirmed,
+                call_confirmed,
+              ],
+          }
         document_id: { type: string, format: uuid }
         delivery_attempt_id: { type: string, format: uuid }
         recipient_name: { type: string }
@@ -290,7 +339,11 @@ components:
     PodReconcile:
       type: object
       properties:
-        status: { type: string, enum: [reconciled, disputed, short_paid, written_off] }
+        status:
+          {
+            type: string,
+            enum: [reconciled, disputed, short_paid, written_off],
+          }
         notes: { type: string }
     Courier:
       type: object
@@ -327,7 +380,21 @@ components:
         pod_amount_expected_ngn: { type: number, nullable: true }
         status:
           type: string
-          enum: [queued, booked, picked_up, in_transit, arrived_destination_city, out_for_delivery, attempted_failed, delivered, returned_to_sender, lost, damaged, cancelled]
+          enum:
+            [
+              queued,
+              booked,
+              picked_up,
+              in_transit,
+              arrived_destination_city,
+              out_for_delivery,
+              attempted_failed,
+              delivered,
+              returned_to_sender,
+              lost,
+              damaged,
+              cancelled,
+            ]
         attempt_count: { type: integer }
         public_tracking_token: { type: string, nullable: true }
         booked_at: { type: string, format: date-time, nullable: true }
@@ -338,10 +405,26 @@ components:
         - $ref: "#/components/schemas/Delivery"
         - type: object
           properties:
-            items: { type: array, items: { type: object, additionalProperties: true } }
-            attempts: { type: array, items: { type: object, additionalProperties: true } }
-            history: { type: array, items: { type: object, additionalProperties: true } }
-            proofs: { type: array, items: { type: object, additionalProperties: true } }
+            items:
+              {
+                type: array,
+                items: { type: object, additionalProperties: true },
+              }
+            attempts:
+              {
+                type: array,
+                items: { type: object, additionalProperties: true },
+              }
+            history:
+              {
+                type: array,
+                items: { type: object, additionalProperties: true },
+              }
+            proofs:
+              {
+                type: array,
+                items: { type: object, additionalProperties: true },
+              }
     PodCollection:
       type: object
       properties:
@@ -356,7 +439,16 @@ components:
         variance_ngn: { type: number }
         status:
           type: string
-          enum: [pending, collected_by_courier, remitted, reconciled, disputed, short_paid, written_off]
+          enum:
+            [
+              pending,
+              collected_by_courier,
+              remitted,
+              reconciled,
+              disputed,
+              short_paid,
+              written_off,
+            ]
         remitted_reference: { type: string, nullable: true }
         sales_order_payment_id: { type: string, format: uuid, nullable: true }
         created_at: { type: string, format: date-time }
@@ -367,7 +459,8 @@ components:
         status: { type: string }
         courier_tracking_ref: { type: string, nullable: true }
         courier_tracking_url: { type: string, nullable: true }
-        expected_delivery_at: { type: string, format: date-time, nullable: true }
+        expected_delivery_at:
+          { type: string, format: date-time, nullable: true }
         delivered_at: { type: string, format: date-time, nullable: true }
         recipient_name_snapshot: { type: string, nullable: true }
         history:
@@ -378,6 +471,391 @@ components:
               to_status: { type: string }
               changed_at: { type: string, format: date-time }
               notes: { type: string, nullable: true }
+
+    # ── Purchasing & Procurement (Module 6.8) ───────────────────
+    SupplierProductInput:
+      type: object
+      required: [variant_id]
+      properties:
+        variant_id: { type: string, format: uuid }
+        supplier_sku: { type: string }
+        supplier_description: { type: string }
+        last_unit_cost: { type: number }
+        last_unit_cost_currency: { type: string }
+        last_unit_cost_ngn: { type: number }
+        lead_time_days: { type: integer }
+        minimum_order_qty: { type: integer }
+        preferred: { type: boolean }
+        is_active: { type: boolean }
+        notes: { type: string }
+    SupplierCreate:
+      type: object
+      required: [contact_id, display_name]
+      properties:
+        contact_id: { type: string, format: uuid }
+        display_name: { type: string, maxLength: 200 }
+        supplier_type:
+          {
+            type: string,
+            enum: [goods, services, factory, 3pl, customs_broker, utility],
+          }
+        country_of_origin: { type: string }
+        city: { type: string }
+        default_currency: { type: string }
+        tax_treatment:
+          {
+            type: string,
+            enum: [standard, zero_rated, exempt, foreign, reverse_charge],
+          }
+        vat_applicable: { type: boolean }
+        wht_applicable: { type: boolean }
+        wht_rate: { type: number, minimum: 0, maximum: 1 }
+        payment_terms_days: { type: integer }
+        credit_limit_ngn: { type: number }
+        bank_name: { type: string }
+        bank_account_number: { type: string }
+        bank_swift: { type: string }
+        bank_routing: { type: string }
+        bank_address: { type: string }
+        preferred: { type: boolean }
+        notes: { type: string }
+        products:
+          {
+            type: array,
+            items: { $ref: "#/components/schemas/SupplierProductInput" },
+          }
+    SupplierUpdate:
+      description: "SupplierCreate fields (except contact_id/products), all optional, + on_hold/hold_reason/is_active/performance_rating."
+      type: object
+      properties:
+        display_name: { type: string }
+        supplier_type:
+          {
+            type: string,
+            enum: [goods, services, factory, 3pl, customs_broker, utility],
+          }
+        country_of_origin: { type: string }
+        city: { type: string }
+        default_currency: { type: string }
+        tax_treatment:
+          {
+            type: string,
+            enum: [standard, zero_rated, exempt, foreign, reverse_charge],
+          }
+        vat_applicable: { type: boolean }
+        wht_applicable: { type: boolean }
+        wht_rate: { type: number }
+        payment_terms_days: { type: integer }
+        credit_limit_ngn: { type: number }
+        bank_name: { type: string }
+        bank_account_number: { type: string }
+        bank_swift: { type: string }
+        bank_routing: { type: string }
+        bank_address: { type: string }
+        preferred: { type: boolean }
+        on_hold: { type: boolean }
+        hold_reason: { type: string }
+        performance_rating: { type: number }
+        notes: { type: string }
+        is_active: { type: boolean }
+    SupplierContactAdd:
+      type: object
+      required: [contact_id]
+      properties:
+        contact_id: { type: string, format: uuid }
+        role: { type: string }
+        is_primary: { type: boolean }
+        notes: { type: string }
+    SupplierProductUpdate:
+      description: "SupplierProductInput fields except variant_id (all optional)."
+      type: object
+      properties:
+        supplier_sku: { type: string }
+        supplier_description: { type: string }
+        last_unit_cost: { type: number }
+        last_unit_cost_currency: { type: string }
+        last_unit_cost_ngn: { type: number }
+        lead_time_days: { type: integer }
+        minimum_order_qty: { type: integer }
+        preferred: { type: boolean }
+        is_active: { type: boolean }
+        notes: { type: string }
+    RfqLineInput:
+      type: object
+      required: [description, quantity]
+      properties:
+        variant_id: { type: string, format: uuid }
+        description: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        unit_of_measure: { type: string }
+        target_unit_price_ngn: { type: number }
+        notes: { type: string }
+    RfqCreate:
+      type: object
+      required: [title, lines]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        response_deadline: { type: string, format: date }
+        lines:
+          {
+            type: array,
+            minItems: 1,
+            items: { $ref: "#/components/schemas/RfqLineInput" },
+          }
+    QuoteCreate:
+      type: object
+      required: [supplier_id, quote_currency, total_quoted, total_quoted_ngn]
+      properties:
+        supplier_id: { type: string, format: uuid }
+        quote_currency: { type: string }
+        total_quoted: { type: number }
+        total_quoted_ngn: { type: number }
+        fx_rate_used: { type: number }
+        line_prices:
+          { type: array, items: { type: object, additionalProperties: true } }
+        payment_terms_days: { type: integer }
+        lead_time_days: { type: integer }
+        validity_until: { type: string, format: date }
+        shipping_terms: { type: string }
+        quote_document_id: { type: string, format: uuid }
+        notes: { type: string }
+    RfqAward:
+      type: object
+      required: [quote_id]
+      properties:
+        quote_id: { type: string, format: uuid }
+    PoLineInput:
+      type: object
+      required: [description, qty_ordered, unit_price]
+      properties:
+        variant_id: { type: string, format: uuid }
+        description: { type: string }
+        supplier_sku: { type: string }
+        qty_ordered: { type: integer, minimum: 1 }
+        unit_price: { type: number }
+        tax_rate: { type: number, minimum: 0, maximum: 1 }
+        notes: { type: string }
+    PoCreate:
+      type: object
+      required: [supplier_id, title, po_currency, lines]
+      properties:
+        supplier_id: { type: string, format: uuid }
+        rfq_id: { type: string, format: uuid }
+        awarded_quote_id: { type: string, format: uuid }
+        title: { type: string }
+        description: { type: string }
+        delivery_location_id: { type: string, format: uuid }
+        po_currency: { type: string }
+        fx_rate: { type: number }
+        shipping: { type: number }
+        payment_terms_days: { type: integer }
+        expected_delivery: { type: string, format: date }
+        shipping_terms: { type: string }
+        lines:
+          {
+            type: array,
+            minItems: 1,
+            items: { $ref: "#/components/schemas/PoLineInput" },
+          }
+    PoAdvance:
+      type: object
+      required: [to_status]
+      properties:
+        to_status:
+          {
+            type: string,
+            enum:
+              [
+                in_production,
+                quality_check,
+                ready_to_ship,
+                in_transit,
+                arrived_lagos,
+                cleared_customs,
+                partially_received,
+                received,
+                closed,
+              ],
+          }
+        notes: { type: string }
+        source: { type: string, enum: [user, system, webhook] }
+    PoCancel:
+      type: object
+      properties: { reason: { type: string } }
+    GrnLineInput:
+      type: object
+      required: [po_line_id, qty_expected, qty_received]
+      properties:
+        po_line_id: { type: string, format: uuid }
+        variant_id: { type: string, format: uuid }
+        qty_expected: { type: integer, minimum: 0 }
+        qty_received: { type: integer, minimum: 0 }
+        qty_rejected: { type: integer, minimum: 0 }
+        inspection_result:
+          { type: string, enum: [pass, partial_pass, fail, pending] }
+        rejection_reason: { type: string }
+        unit_cost_ngn: { type: number }
+    GrnCreate:
+      type: object
+      required: [po_id, received_at_location_id, lines]
+      properties:
+        po_id: { type: string, format: uuid }
+        received_at_location_id: { type: string, format: uuid }
+        inbound_shipment_id: { type: string, format: uuid }
+        delivery_note_ref: { type: string }
+        inspected_by: { type: string, format: uuid }
+        rejection_reason: { type: string }
+        notes: { type: string }
+        lines:
+          {
+            type: array,
+            minItems: 1,
+            items: { $ref: "#/components/schemas/GrnLineInput" },
+          }
+    SupplierInvoiceLineInput:
+      type: object
+      required: [description, quantity, unit_price]
+      properties:
+        po_line_id: { type: string, format: uuid }
+        description: { type: string }
+        quantity: { type: number }
+        unit_price: { type: number }
+        tax_rate: { type: number, minimum: 0, maximum: 1 }
+    SupplierInvoiceCreate:
+      type: object
+      required:
+        [
+          invoice_number,
+          supplier_id,
+          invoice_currency,
+          invoice_date,
+          due_date,
+          lines,
+        ]
+      properties:
+        invoice_number: { type: string }
+        supplier_id: { type: string, format: uuid }
+        po_id: { type: string, format: uuid }
+        invoice_currency: { type: string }
+        fx_rate: { type: number }
+        invoice_date: { type: string, format: date }
+        due_date: { type: string, format: date }
+        shipping: { type: number }
+        wht_amount: { type: number }
+        invoice_document_id: { type: string, format: uuid }
+        notes: { type: string }
+        lines:
+          {
+            type: array,
+            minItems: 1,
+            items: { $ref: "#/components/schemas/SupplierInvoiceLineInput" },
+          }
+    SupplierInvoiceApprove:
+      type: object
+      properties: { override_reason: { type: string } }
+    SupplierInvoicePay:
+      type: object
+      required: [amount_ngn]
+      properties:
+        amount_ngn: { type: number }
+        payment_account_code: { type: string }
+    SupplierInvoiceVoid:
+      type: object
+      properties: { reason: { type: string } }
+    Supplier:
+      type: object
+      properties:
+        supplier_id: { type: string, format: uuid }
+        supplier_code: { type: string }
+        contact_id: { type: string, format: uuid }
+        display_name: { type: string }
+        supplier_type: { type: string }
+        default_currency: { type: string, nullable: true }
+        payment_terms_days: { type: integer }
+        preferred: { type: boolean }
+        on_hold: { type: boolean }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    SupplierDetail:
+      allOf:
+        - $ref: "#/components/schemas/Supplier"
+        - type: object
+          properties:
+            contacts:
+              {
+                type: array,
+                items: { type: object, additionalProperties: true },
+              }
+            products:
+              {
+                type: array,
+                items: { type: object, additionalProperties: true },
+              }
+    PurchaseOrder:
+      type: object
+      properties:
+        po_id: { type: string, format: uuid }
+        po_number: { type: string }
+        supplier_id: { type: string, format: uuid }
+        title: { type: string }
+        po_currency: { type: string }
+        subtotal: { type: number }
+        tax_amount: { type: number }
+        total: { type: number }
+        total_ngn: { type: number }
+        fx_rate_used: { type: number }
+        status: { type: string }
+        total_qty_ordered: { type: integer }
+        total_qty_received: { type: integer }
+        expected_delivery: { type: string, format: date, nullable: true }
+        lines:
+          { type: array, items: { type: object, additionalProperties: true } }
+        history:
+          { type: array, items: { type: object, additionalProperties: true } }
+    Rfq:
+      type: object
+      properties:
+        rfq_id: { type: string, format: uuid }
+        rfq_number: { type: string }
+        title: { type: string }
+        status: { type: string }
+        response_deadline: { type: string, format: date, nullable: true }
+        awarded_supplier_id: { type: string, format: uuid, nullable: true }
+        lines:
+          { type: array, items: { type: object, additionalProperties: true } }
+        quotes:
+          { type: array, items: { type: object, additionalProperties: true } }
+    GoodsReceivedNote:
+      type: object
+      properties:
+        grn_id: { type: string, format: uuid }
+        grn_number: { type: string }
+        po_id: { type: string, format: uuid }
+        status: { type: string }
+        total_qty_received: { type: integer, nullable: true }
+        total_qty_rejected: { type: integer }
+        posted_at: { type: string, format: date-time, nullable: true }
+        lines:
+          { type: array, items: { type: object, additionalProperties: true } }
+    SupplierInvoice:
+      type: object
+      properties:
+        supplier_invoice_id: { type: string, format: uuid }
+        internal_reference: { type: string }
+        invoice_number: { type: string }
+        supplier_id: { type: string, format: uuid }
+        po_id: { type: string, format: uuid, nullable: true }
+        total_ngn: { type: number }
+        amount_paid_ngn: { type: number }
+        balance_due_ngn: { type: number }
+        status: { type: string }
+        match_status: { type: string }
+        journal_entry_id: { type: string, format: uuid, nullable: true }
+        lines:
+          { type: array, items: { type: object, additionalProperties: true } }
+        matches:
+          { type: array, items: { type: object, additionalProperties: true } }
 
 paths:
   /auth/login:
@@ -795,8 +1273,17 @@ paths:
       tags: [sales_campaigns]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: format, in: query, schema: { type: string, enum: [json, pdf] } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: format,
+            in: query,
+            schema: { type: string, enum: [json, pdf] },
+          }
       x-required-permission: "sales_campaigns.view"
       x-is-write: false
       responses:
@@ -812,7 +1299,11 @@ paths:
         - $ref: "#/components/parameters/BrandContext"
         - { name: document_type, in: query, schema: { type: string } }
         - { name: reference_type, in: query, schema: { type: string } }
-        - { name: reference_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: reference_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
         - { name: q, in: query, schema: { type: string } }
       x-required-permission: "documents.view"
       x-is-write: false
@@ -842,12 +1333,21 @@ paths:
   /documents/{id}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get document metadata
       tags: [documents]
       x-required-permission: "documents.view"
-      responses: { "200": { description: Document }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: Document },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
     delete:
       summary: Delete a document
       tags: [documents]
@@ -860,9 +1360,18 @@ paths:
       tags: [documents]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "documents.view"
-      responses: { "200": { description: File stream }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: File stream },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /documents/signatures:
     get:
       summary: List e-signature requests
@@ -879,33 +1388,60 @@ paths:
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "documents.create"
       x-is-write: true
-      responses: { "201": { description: Draft request created }, "400": { $ref: "#/components/responses/ValidationError" } }
+      responses:
+        {
+          "201": { description: Draft request created },
+          "400": { $ref: "#/components/responses/ValidationError" },
+        }
   /documents/signatures/{id}:
     get:
       summary: Get a signature request (signers + hash-chained audit events)
       tags: [documents, signatures]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "documents.view"
-      responses: { "200": { description: Signature request detail }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: Signature request detail },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /documents/signatures/{id}/send:
     post:
       summary: Send a draft request to its signers
       tags: [documents, signatures]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "documents.edit"
       x-is-write: true
-      responses: { "200": { description: Sent }, "409": { description: Not in draft state } }
+      responses:
+        {
+          "200": { description: Sent },
+          "409": { description: Not in draft state },
+        }
   /documents/signatures/{id}/cancel:
     post:
       summary: Cancel a not-yet-complete request
       tags: [documents, signatures]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "documents.edit"
       x-is-write: true
       responses: { "200": { description: Cancelled } }
@@ -915,7 +1451,12 @@ paths:
       tags: [documents, signatures]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "documents.delete"
       x-is-write: true
       responses: { "200": { description: Voided } }
@@ -925,9 +1466,15 @@ paths:
       tags: [documents, signatures]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "documents.view"
-      responses: { "200": { description: "{ intact, event_count, broken_at }" } }
+      responses:
+        { "200": { description: "{ intact, event_count, broken_at }" } }
 
   # ── Public signing (served at /api/public/sign — NO /api/v1, no auth) ──
   /sign/{token}:
@@ -935,21 +1482,32 @@ paths:
       summary: "PUBLIC: view a signing request by token (served at /api/public/sign/{token})"
       tags: [signatures, public]
       security: []
-      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
-      responses: { "200": { description: Request + signer view }, "404": { $ref: "#/components/responses/NotFound" } }
+      parameters:
+        [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        {
+          "200": { description: Request + signer view },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /sign/{token}/sign:
     post:
       summary: "PUBLIC: submit a signature by token"
       tags: [signatures, public]
       security: []
-      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
-      responses: { "200": { description: Signed }, "409": { description: Already signed/expired/out of turn } }
+      parameters:
+        [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        {
+          "200": { description: Signed },
+          "409": { description: Already signed/expired/out of turn },
+        }
   /sign/{token}/decline:
     post:
       summary: "PUBLIC: decline by token"
       tags: [signatures, public]
       security: []
-      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
+      parameters:
+        [{ name: token, in: path, required: true, schema: { type: string } }]
       responses: { "200": { description: Declined } }
 
   # ── Accounting & Finance (Module 6.6) ───────────────────────────
@@ -966,7 +1524,12 @@ paths:
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: groupId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: groupId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.edit"
       x-is-write: true
       responses: { "200": { description: Updated } }
@@ -1019,9 +1582,18 @@ paths:
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: statementId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: statementId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.view"
-      responses: { "200": { description: Statement }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: Statement },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /accounting/bank-reconciliations:
     get:
       summary: List reconciliations
@@ -1035,23 +1607,41 @@ paths:
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "accounting.create"
       x-is-write: true
-      responses: { "201": { description: Opened }, "422": { description: No open fiscal period } }
+      responses:
+        {
+          "201": { description: Opened },
+          "422": { description: No open fiscal period },
+        }
   /accounting/bank-reconciliations/{reconId}:
     get:
       summary: Get a reconciliation (with matches)
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: reconId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: reconId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.view"
-      responses: { "200": { description: Reconciliation }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: Reconciliation },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /accounting/bank-reconciliations/{reconId}/matches:
     post:
       summary: Match a statement line to a payment / journal entry
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: reconId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: reconId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.edit"
       x-is-write: true
       responses: { "201": { description: Matched } }
@@ -1061,7 +1651,12 @@ paths:
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: reconId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: reconId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.approve"
       x-is-write: true
       responses: { "200": { description: Completed } }
@@ -1088,7 +1683,12 @@ paths:
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: filingId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: filingId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.approve"
       x-is-write: true
       responses: { "200": { description: Reviewed } }
@@ -1098,7 +1698,12 @@ paths:
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: filingId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: filingId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.approve"
       x-is-write: true
       responses: { "200": { description: Filed } }
@@ -1108,7 +1713,12 @@ paths:
       tags: [accounting]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: filingId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: filingId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "accounting.approve"
       x-is-write: true
       responses: { "200": { description: Paid + GL posted } }
@@ -1120,12 +1730,30 @@ paths:
       tags: [stock]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: location_id, in: query, schema: { type: string, format: uuid } }
-        - { name: variant_id, in: query, schema: { type: string, format: uuid } }
-        - { name: product_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: location_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: variant_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: product_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "stock.view"
       x-is-write: false
-      responses: { "200": { description: "Lines + summary { total_units, total_value_ngn, missing_cost_count }" } }
+      responses:
+        {
+          "200":
+            {
+              description: "Lines + summary { total_units, total_value_ngn, missing_cost_count }",
+            },
+        }
 
   # ── Purchasing & Procurement (Module 6.8) ───────────────────────
   /purchasing/suppliers:
@@ -1149,12 +1777,21 @@ paths:
   /purchasing/suppliers/{supplierId}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: supplierId, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: supplierId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get a supplier (contacts + product mappings)
       tags: [purchasing]
       x-required-permission: "purchasing.view"
-      responses: { "200": { description: Supplier }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: Supplier },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
     patch:
       summary: Update a supplier (incl. on_hold)
       tags: [purchasing]
@@ -1164,7 +1801,12 @@ paths:
   /purchasing/suppliers/{supplierId}/contacts:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: supplierId, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: supplierId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: List supplier contacts
       tags: [purchasing]
@@ -1182,15 +1824,30 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: supplierId, in: path, required: true, schema: { type: string, format: uuid } }
-        - { name: linkId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: supplierId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+        - {
+            name: linkId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
       responses: { "200": { description: Removed } }
   /purchasing/suppliers/{supplierId}/products:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: supplierId, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: supplierId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: List supplier↔variant mappings
       tags: [purchasing]
@@ -1205,7 +1862,12 @@ paths:
   /purchasing/supplier-products/{linkId}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: linkId, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: linkId,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     patch:
       summary: Update a supplier-product link
       tags: [purchasing]
@@ -1240,16 +1902,30 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: rfqId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: rfqId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.view"
-      responses: { "200": { description: RFQ }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: RFQ },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /purchasing/rfqs/{rfqId}/send:
     post:
       summary: Send an RFQ to suppliers
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: rfqId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: rfqId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
       responses: { "200": { description: Sent } }
@@ -1259,7 +1935,12 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: rfqId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: rfqId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
       responses: { "201": { description: Recorded } }
@@ -1269,7 +1950,12 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: rfqId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: rfqId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.approve"
       x-is-write: true
       responses: { "200": { description: Awarded } }
@@ -1280,7 +1966,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BrandContext"
         - { name: status, in: query, schema: { type: string } }
-        - { name: supplier_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: supplier_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
         - { name: open, in: query, schema: { type: boolean } }
       x-required-permission: "purchasing.view"
       responses: { "200": { description: POs } }
@@ -1297,16 +1987,30 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: poId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: poId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.view"
-      responses: { "200": { description: PO }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: PO },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /purchasing/purchase-orders/{poId}/submit:
     post:
       summary: Submit a PO for approval (opens workflow; mgr ≤₦500k / CEO above)
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: poId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: poId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
       responses: { "200": { description: Submitted } }
@@ -1316,7 +2020,12 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: poId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: poId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.approve"
       x-is-write: true
       responses: { "200": { description: Approved } }
@@ -1326,17 +2035,31 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: poId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: poId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
-      responses: { "200": { description: Advanced }, "409": { description: Illegal transition } }
+      responses:
+        {
+          "200": { description: Advanced },
+          "409": { description: Illegal transition },
+        }
   /purchasing/purchase-orders/{poId}/cancel:
     post:
       summary: Cancel a PO
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: poId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: poId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.delete"
       x-is-write: true
       responses: { "200": { description: Cancelled } }
@@ -1363,16 +2086,30 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: grnId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: grnId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.view"
-      responses: { "200": { description: GRN }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: GRN },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /purchasing/goods-received-notes/{grnId}/post:
     post:
       summary: Post a GRN — receives stock + rolls qty to the PO
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: grnId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: grnId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
       responses: { "200": { description: Posted } }
@@ -1383,7 +2120,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BrandContext"
         - { name: status, in: query, schema: { type: string } }
-        - { name: supplier_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: supplier_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
         - { name: unpaid, in: query, schema: { type: boolean } }
       x-required-permission: "purchasing.view"
       responses: { "200": { description: Supplier invoices } }
@@ -1400,16 +2141,30 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: invoiceId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.view"
-      responses: { "200": { description: Invoice }, "404": { $ref: "#/components/responses/NotFound" } }
+      responses:
+        {
+          "200": { description: Invoice },
+          "404": { $ref: "#/components/responses/NotFound" },
+        }
   /purchasing/supplier-invoices/{invoiceId}/match:
     post:
       summary: Three-way match (PO ↔ GRN ↔ invoice)
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: invoiceId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.edit"
       x-is-write: true
       responses: { "200": { description: Match result } }
@@ -1419,17 +2174,31 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: invoiceId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.approve"
       x-is-write: true
-      responses: { "200": { description: Approved + GL posted }, "409": { description: Unresolved match variance } }
+      responses:
+        {
+          "200": { description: Approved + GL posted },
+          "409": { description: Unresolved match variance },
+        }
   /purchasing/supplier-invoices/{invoiceId}/pay:
     post:
       summary: Pay an invoice (DR AP / CR Cash, WHT withheld)
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: invoiceId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.approve"
       x-is-write: true
       responses: { "201": { description: Payment posted } }
@@ -1439,7 +2208,12 @@ paths:
       tags: [purchasing]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: invoiceId, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: invoiceId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "purchasing.delete"
       x-is-write: true
       responses: { "200": { description: Voided } }
@@ -1458,7 +2232,11 @@ paths:
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "business_setup.edit"
       x-is-write: true
-      responses: { "200": { description: Updated }, "409": { description: prefix locked } }
+      responses:
+        {
+          "200": { description: Updated },
+          "409": { description: prefix locked },
+        }
   /business-setup/currencies:
     get:
       summary: List currencies
@@ -1527,7 +2305,12 @@ paths:
   /business-setup/bank-accounts/{id}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get a bank account (masked)
       tags: [business_setup]
@@ -1562,7 +2345,12 @@ paths:
       tags: [business_setup]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "business_setup.edit"
       x-is-write: true
       responses: { "200": { description: Superseded } }
@@ -1579,10 +2367,19 @@ paths:
       tags: [business_setup]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "business_setup.edit"
       x-is-write: true
-      responses: { "200": { description: Updated }, "409": { description: Already issued } }
+      responses:
+        {
+          "200": { description: Updated },
+          "409": { description: Already issued },
+        }
   /business-setup/custom-fields:
     get:
       summary: List custom field defs
@@ -1605,7 +2402,12 @@ paths:
       tags: [business_setup]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "business_setup.edit"
       x-is-write: true
       responses: { "200": { description: Updated } }
@@ -1628,7 +2430,12 @@ paths:
   /business-setup/pipeline-stages/{id}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     patch:
       summary: Update a pipeline stage def
       tags: [business_setup]
@@ -1662,7 +2469,12 @@ paths:
   /pos/terminals/{id}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get a terminal
       tags: [pos]
@@ -1688,7 +2500,12 @@ paths:
       tags: [pos]
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "pos.view"
-      responses: { "200": { description: Verified }, "401": { description: Invalid }, "423": { description: Locked } }
+      responses:
+        {
+          "200": { description: Verified },
+          "401": { description: Invalid },
+          "423": { description: Locked },
+        }
   /pos/sessions:
     get:
       summary: List sessions
@@ -1696,7 +2513,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BrandContext"
         - { name: status, in: query, schema: { type: string } }
-        - { name: terminal_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: terminal_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "pos.view"
       responses: { "200": { description: Sessions } }
     post:
@@ -1705,14 +2526,23 @@ paths:
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "pos.create"
       x-is-write: true
-      responses: { "201": { description: Opened }, "409": { description: Terminal already open } }
+      responses:
+        {
+          "201": { description: Opened },
+          "409": { description: Terminal already open },
+        }
   /pos/sessions/{id}:
     get:
       summary: Get a session
       tags: [pos]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "pos.view"
       responses: { "200": { description: Session } }
   /pos/sessions/{id}/close:
@@ -1721,17 +2551,31 @@ paths:
       tags: [pos]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "pos.edit"
       x-is-write: true
-      responses: { "200": { description: Closed }, "400": { description: Variance explanation required } }
+      responses:
+        {
+          "200": { description: Closed },
+          "400": { description: Variance explanation required },
+        }
   /pos/sessions/{id}/reconcile:
     post:
       summary: Reconcile a closed session (manager)
       tags: [pos]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "pos.approve"
       x-is-write: true
       responses: { "200": { description: Reconciled } }
@@ -1757,7 +2601,11 @@ paths:
       tags: [pos]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: session_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: session_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
         - { name: status, in: query, schema: { type: string } }
       x-required-permission: "pos.view"
       responses: { "200": { description: Transactions } }
@@ -1767,7 +2615,12 @@ paths:
       tags: [pos]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "pos.view"
       responses: { "200": { description: Transaction } }
   /pos/transactions/{id}/void:
@@ -1776,12 +2629,18 @@ paths:
       tags: [pos]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "pos.approve"
       x-is-write: true
       responses: { "200": { description: Voided } }
 
   # ── Logistics & Delivery (Module 6.10) ──────────────────────────
+  # Fully typed (request + response) — reference pattern for the other modules.
   /logistics/couriers:
     get:
       summary: List couriers
@@ -1790,29 +2649,81 @@ paths:
         - $ref: "#/components/parameters/BrandContext"
         - { name: is_active, in: query, schema: { type: boolean } }
       x-required-permission: "logistics.view"
-      responses: { "200": { description: Couriers } }
+      x-is-write: false
+      responses:
+        "200":
+          description: Couriers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Courier" },
+                    }
     post:
       summary: Create a courier (rate card)
       tags: [logistics]
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "logistics.create"
       x-is-write: true
-      responses: { "201": { description: Created } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CourierCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Courier" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
   /logistics/couriers/{id}:
     parameters:
       - $ref: "#/components/parameters/BrandContext"
-      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {
+          name: id,
+          in: path,
+          required: true,
+          schema: { type: string, format: uuid },
+        }
     get:
       summary: Get a courier
       tags: [logistics]
       x-required-permission: "logistics.view"
-      responses: { "200": { description: Courier } }
+      x-is-write: false
+      responses:
+        "200":
+          description: Courier
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Courier" } }
+        "404": { $ref: "#/components/responses/NotFound" }
     patch:
       summary: Update a courier
       tags: [logistics]
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "200": { description: Updated } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CourierUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Courier" } }
   /logistics/courier-events:
     post:
       summary: Ingest a courier webhook event (maps onto the state machine)
@@ -1820,7 +2731,14 @@ paths:
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "201": { description: Ingested } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CourierWebhookIngest" }
+      responses:
+        "201": { description: Ingested }
+        "400": { $ref: "#/components/responses/ValidationError" }
   /logistics/deliveries:
     get:
       summary: List deliveries
@@ -1828,85 +2746,233 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BrandContext"
         - { name: status, in: query, schema: { type: string } }
-        - { name: courier_id, in: query, schema: { type: string, format: uuid } }
+        - {
+            name: courier_id,
+            in: query,
+            schema: { type: string, format: uuid },
+          }
         - { name: order_id, in: query, schema: { type: string, format: uuid } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - {
+            name: page_size,
+            in: query,
+            schema: { type: integer, default: 25, maximum: 100 },
+          }
       x-required-permission: "logistics.view"
-      responses: { "200": { description: Deliveries } }
+      x-is-write: false
+      responses:
+        "200":
+          description: A page of deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/Delivery" },
+                    }
+                  meta: { $ref: "#/components/schemas/ListMeta" }
     post:
       summary: Create a delivery (+items)
       tags: [logistics]
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "logistics.create"
       x-is-write: true
-      responses: { "201": { description: Created } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/DeliveryDetail" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
   /logistics/deliveries/{id}:
     get:
       summary: Get a delivery (items + attempts + history + proofs)
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.view"
-      responses: { "200": { description: Delivery }, "404": { $ref: "#/components/responses/NotFound" } }
+      x-is-write: false
+      responses:
+        "200":
+          description: Delivery detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/DeliveryDetail" } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /logistics/deliveries/{id}/book:
     post:
       summary: Book a queued delivery with the courier
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "200": { description: Booked } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryBook" }
+      responses:
+        "200":
+          description: Booked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Delivery" } }
+        "409": { description: Not in queued state }
   /logistics/deliveries/{id}/advance:
     post:
       summary: Advance the delivery state machine
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "200": { description: Advanced }, "409": { description: Illegal transition } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryAdvance" }
+      responses:
+        "200":
+          description: Advanced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Delivery" } }
+        "409": { description: Illegal transition }
   /logistics/deliveries/{id}/cancel:
     post:
       summary: Cancel a delivery
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.delete"
       x-is-write: true
-      responses: { "200": { description: Cancelled } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryCancel" }
+      responses:
+        "200":
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Delivery" } }
   /logistics/deliveries/{id}/attempts:
     post:
       summary: Record a delivery attempt (outcome drives status)
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "201": { description: Attempt recorded } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryAttempt" }
+      responses:
+        "201": { description: Attempt recorded }
+        "400": { $ref: "#/components/responses/ValidationError" }
   /logistics/deliveries/{id}/proofs:
     post:
       summary: Attach proof of delivery (photo/signature/ID/OTP)
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "201": { description: Proof recorded } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeliveryProof" }
+      responses:
+        "201": { description: Proof recorded }
+        "400": { $ref: "#/components/responses/ValidationError" }
   /logistics/deliveries/{id}/webhook-events:
     get:
       summary: List courier webhook events for a delivery
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.view"
-      responses: { "200": { description: Events } }
+      x-is-write: false
+      responses:
+        "200":
+          description: Events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  {
+                    data:
+                      {
+                        type: array,
+                        items: { type: object, additionalProperties: true },
+                      },
+                  }
   /logistics/pod-collections:
     get:
       summary: List pay-on-delivery collections
@@ -1914,54 +2980,155 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BrandContext"
         - { name: status, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - {
+            name: page_size,
+            in: query,
+            schema: { type: integer, default: 25, maximum: 100 },
+          }
       x-required-permission: "logistics.view"
-      responses: { "200": { description: POD collections } }
+      x-is-write: false
+      responses:
+        "200":
+          description: A page of POD collections
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    {
+                      type: array,
+                      items: { $ref: "#/components/schemas/PodCollection" },
+                    }
+                  meta: { $ref: "#/components/schemas/ListMeta" }
     post:
       summary: Open a POD collection for a delivery
       tags: [logistics]
       parameters: [{ $ref: "#/components/parameters/BrandContext" }]
       x-required-permission: "logistics.create"
       x-is-write: true
-      responses: { "201": { description: Created } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PodCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/PodCollection" } }
+        "422": { description: Delivery not POD / no expected amount }
   /logistics/pod-collections/{id}:
     get:
       summary: Get a POD collection
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.view"
-      responses: { "200": { description: POD collection } }
+      x-is-write: false
+      responses:
+        "200":
+          description: POD collection
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/PodCollection" } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /logistics/pod-collections/{id}/collected:
     post:
       summary: Mark cash collected by the courier
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "200": { description: Collected } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PodCollected" }
+      responses:
+        "200":
+          description: Collected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/PodCollection" } }
   /logistics/pod-collections/{id}/remit:
     post:
       summary: Record remittance — posts a sales payment on the order
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.edit"
       x-is-write: true
-      responses: { "200": { description: Remitted } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PodRemit" }
+      responses:
+        "200":
+          description: Remitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/PodCollection" } }
   /logistics/pod-collections/{id}/reconcile:
     post:
       summary: Reconcile a remitted POD collection (manager)
       tags: [logistics]
       parameters:
         - $ref: "#/components/parameters/BrandContext"
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - {
+            name: id,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       x-required-permission: "logistics.approve"
       x-is-write: true
-      responses: { "200": { description: Reconciled } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PodReconcile" }
+      responses:
+        "200":
+          description: Reconciled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/PodCollection" } }
 
   # ── Public delivery tracking (served at /api/public/tracking — no auth) ──
   /tracking/{token}:
@@ -1969,8 +3136,18 @@ paths:
       summary: "PUBLIC: track a delivery by token (served at /api/public/tracking/{token})"
       tags: [logistics, public]
       security: []
-      parameters: [{ name: token, in: path, required: true, schema: { type: string } }]
-      responses: { "200": { description: Status + state history }, "404": { $ref: "#/components/responses/NotFound" } }
+      parameters:
+        [{ name: token, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: Status + state history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  { data: { $ref: "#/components/schemas/DeliveryTracking" } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   # ── Public (no auth) — served under /api/public, not /api/v1 ──────
   /sale/{slug}:
