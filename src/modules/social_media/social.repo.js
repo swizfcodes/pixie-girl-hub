@@ -7,6 +7,7 @@
 "use strict";
 
 const { query } = require("../../config/database");
+const ex = (c) => (c ? c.query.bind(c) : query);
 
 // ── Accounts ───────────────────────────────────────────────
 async function createAccount({ brand, account }) {
@@ -137,7 +138,7 @@ async function upsertMetrics({ brand, post_id, metric_date, m }) {
       m.link_clicks,
     ],
   );
-  // void ex;
+  void ex;
   return rows[0];
 }
 async function listMetrics({ post_id }) {

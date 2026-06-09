@@ -185,128 +185,9 @@ async function receiveProduction({ brand, user, request_id, id, input }) {
   return updated;
 }
 
-// ── Service jobs ───────────────────────────────────────────
-function listServiceJobs(args) {
-  return repo.listServiceJobs(args);
-}
-async function getServiceJob({ brand, id }) {
-  const job = await repo.getServiceJob({ brand, id });
-  if (!job) throw new NotFoundError("Service job");
-  return job;
-}
-async function createServiceJob({ brand, user, request_id, input }) {
-  return transaction(async (client) => {
-    const job_number = await repo.nextNumber({
-      client,
-      brand,
-      type: "service_job",
-    });
-    const job = await repo.createServiceJob({
-      client,
-      brand,
-      job: { ...input, job_number },
-    });
-    await A(
-      brand,
-      user,
-      "production.service_job.create",
-      "service_job",
-      job.job_id,
-      { job_number },
-      request_id,
-    );
-    events.emit("service_job.created", { brand, job_id: job.job_id });
-    return job;
-  });
-}
-async function advanceServiceJob({
-  brand,
-  user,
-  request_id,
-  id,
-  status,
-  actual_cost_ngn,
-}) {
-  return transaction(async (client) => {
-    const before = await repo.getServiceJob({ client, brand, id });
-    if (!before) throw new NotFoundError("Service job");
-    const fields = {};
-    if (actual_cost_ngn !== null) fields.actual_cost_ngn = actual_cost_ngn;
-    const job = await repo.setServiceJobStatus({
-      client,
-      brand,
-      id,
-      status,
-      fields,
-    });
-    await A(
-      brand,
-      user,
-      "production.service_job.advance",
-      "service_job",
-      id,
-      { from: before.status, to: status },
-      request_id,
-    );
-    events.emit("service_job.advanced", { brand, job_id: id, status });
-    return job;
-  });
-}
-
-/**
- * G-1: open a styling service job for a deposit-triggered (custom) order once
- * the deposit clears. No-ops if the brand has no service types configured
- * (e.g. PXG) or a job already exists for the order.
- */
-async function createServiceJobForOrder({ brand, order }) {
-  if (!order) return null;
-  return transaction(async (client) => {
-    if (
-      await repo.serviceJobExistsForOrder({
-        client,
-        brand,
-        order_id: order.order_id,
-      })
-    )
-      return null;
-    const st = await repo.getDefaultServiceType({ client, brand });
-    if (!st) return null; // brand runs no styling services
-    const firstLine = (order.lines || [])[0] || {};
-    const job_number = await repo.nextNumber({
-      client,
-      brand,
-      type: "service_job",
-    });
-    const job = await repo.createServiceJob({
-      client,
-      brand,
-      job: {
-        job_number,
-        service_type_id: st.service_type_id,
-        hair_variant_id: firstLine.variant_id || null,
-        sales_order_id: order.order_id,
-        customer_contact_id: order.contact_id,
-        status: "pending",
-        agreed_cost_ngn: st.standard_cost_ngn,
-      },
-    });
-    await A(
-      brand,
-      null,
-      "production.service_job.from_order",
-      "service_job",
-      job.job_id,
-      { order_id: order.order_id },
-      null,
-    );
-    events.emit("service_job.created", {
-      brand,
-      job_id: job.job_id,
-      order_id: order.order_id,
-    });
-    return job;
-  });
-}
+// Service jobs are owned by the standalone Service Jobs module
+// (src/modules/service_jobs). The deposit_met → service-job connection now
+// lives in service-jobs.subscribers.
 
 module.exports = {
   listRuns,
@@ -316,9 +197,4 @@ module.exports = {
   addCostComponent,
   addUnit,
   receiveProduction,
-  listServiceJobs,
-  getServiceJob,
-  createServiceJob,
-  advanceServiceJob,
-  createServiceJobForOrder,
 };

@@ -19,15 +19,6 @@ const RUN_STATUS = [
   "completed",
   "cancelled",
 ];
-const JOB_STATUS = [
-  "pending",
-  "in_progress",
-  "on_hold",
-  "completed",
-  "rejected",
-  "cancelled",
-];
-
 const runCreate = z
   .object({
     title: z.string().min(1).max(200),
@@ -65,24 +56,6 @@ const receive = z
   })
   .strict();
 
-const serviceJobCreate = z
-  .object({
-    service_type_id: z.string().uuid(),
-    hair_variant_id: z.string().uuid().optional(),
-    sales_order_id: z.string().uuid().optional(),
-    customer_contact_id: z.string().uuid().optional(),
-    assigned_staff_user_id: z.string().uuid().optional(),
-    agreed_cost_ngn: z.coerce.number().nonnegative().optional(),
-  })
-  .strict();
-
-const serviceJobAdvance = z
-  .object({
-    status: z.enum(JOB_STATUS),
-    actual_cost_ngn: z.coerce.number().nonnegative().optional(),
-  })
-  .strict();
-
 const mk = (schema) => (req, _res, next) => {
   req.body = schema.parse(req.body || {});
   next();
@@ -94,6 +67,4 @@ module.exports = {
   validateCostAdd: mk(costAdd),
   validateUnitAdd: mk(unitAdd),
   validateReceive: mk(receive),
-  validateServiceJobCreate: mk(serviceJobCreate),
-  validateServiceJobAdvance: mk(serviceJobAdvance),
 };

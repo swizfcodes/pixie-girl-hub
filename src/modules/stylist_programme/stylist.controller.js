@@ -27,11 +27,9 @@ async function getPartner(req, res) {
   res.json({ data: await service.getPartner({ id: req.params.id }) });
 }
 async function createPartner(req, res) {
-  res
-    .status(201)
-    .json({
-      data: await service.createPartner({ ...base(req), input: req.body }),
-    });
+  res.status(201).json({
+    data: await service.createPartner({ ...base(req), input: req.body }),
+  });
 }
 async function updatePartner(req, res) {
   res.json({
@@ -72,15 +70,13 @@ async function listSpecialities(req, res) {
   });
 }
 async function setSpeciality(req, res) {
-  res
-    .status(201)
-    .json({
-      data: await service.setSpeciality({
-        ...base(req),
-        id: req.params.id,
-        input: req.body,
-      }),
-    });
+  res.status(201).json({
+    data: await service.setSpeciality({
+      ...base(req),
+      id: req.params.id,
+      input: req.body,
+    }),
+  });
 }
 async function removeSpeciality(req, res) {
   await service.removeSpeciality({
@@ -94,15 +90,13 @@ async function listCertifications(req, res) {
   res.json({ data: await service.listCertifications({ id: req.params.id }) });
 }
 async function awardCertification(req, res) {
-  res
-    .status(201)
-    .json({
-      data: await service.awardCertification({
-        ...base(req),
-        id: req.params.id,
-        input: req.body,
-      }),
-    });
+  res.status(201).json({
+    data: await service.awardCertification({
+      ...base(req),
+      id: req.params.id,
+      input: req.body,
+    }),
+  });
 }
 async function revokeCertification(req, res) {
   res.json({
@@ -128,11 +122,9 @@ async function getAssignment(req, res) {
   res.json({ data: await service.getAssignment({ id: req.params.id }) });
 }
 async function openAssignment(req, res) {
-  res
-    .status(201)
-    .json({
-      data: await service.openAssignment({ ...base(req), input: req.body }),
-    });
+  res.status(201).json({
+    data: await service.openAssignment({ ...base(req), input: req.body }),
+  });
 }
 async function cancelAssignment(req, res) {
   res.json({
@@ -166,11 +158,9 @@ async function getPayout(req, res) {
   res.json({ data: await service.getPayout({ id: req.params.id }) });
 }
 async function generatePayout(req, res) {
-  res
-    .status(201)
-    .json({
-      data: await service.generatePayout({ ...base(req), input: req.body }),
-    });
+  res.status(201).json({
+    data: await service.generatePayout({ ...base(req), input: req.body }),
+  });
 }
 async function approvePayout(req, res) {
   res.json({

@@ -1,5 +1,6 @@
 /**
- * Stylist subscriber — connect Production (§6.24) to the partner programme.
+ * Stylist subscriber — connect the Service Jobs module (§6.24) to the partner
+ * programme.
  *
  * When a styling service_job is created with a customer but no in-house owner
  * (no assigned staff and no stylist yet), open a routing assignment so the job
@@ -10,7 +11,7 @@
 
 "use strict";
 
-const productionEvents = require("../production/production.events");
+const serviceJobEvents = require("../service_jobs/service-jobs.events");
 const repo = require("./stylist.repo");
 const service = require("./stylist.service");
 const { logger } = require("../../config/logger");
@@ -20,7 +21,7 @@ let registered = false;
 function register() {
   if (registered) return;
   registered = true;
-  productionEvents.on("service_job.created", async ({ brand, job_id }) => {
+  serviceJobEvents.on("created", async ({ brand, job_id }) => {
     try {
       const job = await repo.getServiceJob({ brand, job_id });
       if (!job) return;
@@ -62,7 +63,7 @@ function register() {
     }
   });
   logger.info(
-    "stylist subscribers registered (production.service_job.created → routing assignment)",
+    "stylist subscribers registered (service_jobs.created → routing assignment)",
   );
 }
 

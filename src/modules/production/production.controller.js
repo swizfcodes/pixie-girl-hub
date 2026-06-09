@@ -72,39 +72,6 @@ async function receiveProduction(req, res) {
   });
 }
 
-// ── Service jobs ───────────────────────────────────────────
-async function listServiceJobs(req, res) {
-  const { page, page_size } = parsePagination(req.query);
-  res.json(
-    await service.listServiceJobs({
-      brand: req.brand,
-      status: req.query.status,
-      page,
-      page_size,
-    }),
-  );
-}
-async function getServiceJob(req, res) {
-  res.json({
-    data: await service.getServiceJob({ brand: req.brand, id: req.params.id }),
-  });
-}
-async function createServiceJob(req, res) {
-  res.status(201).json({
-    data: await service.createServiceJob({ ...base(req), input: req.body }),
-  });
-}
-async function advanceServiceJob(req, res) {
-  res.json({
-    data: await service.advanceServiceJob({
-      ...base(req),
-      id: req.params.id,
-      status: req.body.status,
-      actual_cost_ngn: req.body.actual_cost_ngn,
-    }),
-  });
-}
-
 module.exports = {
   listRuns,
   getRun,
@@ -113,8 +80,4 @@ module.exports = {
   addCostComponent,
   addUnit,
   receiveProduction,
-  listServiceJobs,
-  getServiceJob,
-  createServiceJob,
-  advanceServiceJob,
 };

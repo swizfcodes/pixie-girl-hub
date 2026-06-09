@@ -1,75 +1,264 @@
 /**
- * Faitlyn Service Job Tracker (V2.2 §6.24)
- * Repository — parameterised SQL only. No business logic, no HTTP.
+ * Faitlyn Service Job Tracker (V2.2 §6.24) — repository.
  *
- * Conventions:
- *   - Every function takes a { client?, brand, ... } options object.
- *   - If `client` is provided, run within that transaction; else use the
- *     pool (via `query`).
- *   - All values bound with $1..$N placeholders. NEVER string-interpolate.
- *   - Schema names are switched by brand: pixiegirl.* or faitlynhair.*.
- *   - For shared tables (audit_log, contacts, etc.), use the `shared.` schema
- *     and filter by `business` column.
+ * Canonical owner of per-brand service_types + service_jobs (split out of
+ * Production). A service_job insert fires the DB trigger that auto-creates a
+ * staff task; deposit-triggered orders open a job via the subscriber; a stylist
+ * assignment may be opened from a job (stylist programme §6.26). Parameterised
+ * SQL only; per-brand tables via the brand registry `t()`.
  */
 
 "use strict";
 
 const { query } = require("../../config/database");
+const { t } = require("../../config/brands");
 
-const { VALID_BRANDS } = require("../../config/brands");
+const ex = (c) => (c ? c.query.bind(c) : query);
 
-function tableFor(brand) {
-  if (!VALID_BRANDS.has(brand)) throw new Error(`Invalid brand: ${brand}`);
-  return `${brand}.service_types`;
+async function nextNumber({ client, brand, type }) {
+  const { rows } = await ex(client)(
+    `SELECT ${t(brand, "fn_next_document_number")}($1) AS n`,
+    [type],
+  );
+  return rows[0].n;
 }
 
-async function findAll({
-  client,
-  brand,
-  scope,
-  user_id,
-  filters = {},
-  page = 1,
-  page_size = 25,
-}) {
-  // TODO: build dynamic WHERE based on filters + scope ('all' | 'team' | 'own')
-  const offset = (page - 1) * page_size;
-  const sql = `
-    SELECT *
-      FROM ${tableFor(brand)}
-     WHERE COALESCE(is_deleted, false) = false
-     ORDER BY created_at DESC
-     LIMIT $1 OFFSET $2
-  `;
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [page_size, offset]);
-  return { data: rows, page, page_size, total: rows.length }; // TODO: real count query
+// ── service_types ──────────────────────────────────────────
+async function listServiceTypes({ brand, is_active }) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (is_active !== undefined) {
+    where.push(`is_active = $${i++}`);
+    params.push(is_active);
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "service_types")} ${w} ORDER BY display_order, display_name`,
+    params,
+  );
+  return rows;
 }
-
-async function findById({ client, brand, id }) {
-  const sql = `SELECT * FROM ${tableFor(brand)} WHERE service_types_id = $1 LIMIT 1`;
-  // NOTE: replace `service_types_id` with the actual PK name for this table
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [id]);
+async function getDefaultServiceType({ client, brand }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "service_types")} WHERE is_active = true
+      ORDER BY display_order, display_name LIMIT 1`,
+  );
+  return rows[0] || null;
+}
+async function findServiceType({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "service_types")} WHERE service_type_id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+async function createServiceType({ brand, st }) {
+  const { rows } = await query(
+    `INSERT INTO ${t(brand, "service_types")}
+       (service_key, display_name, description, standard_cost_ngn,
+        standard_turnaround_days, default_account_id, display_order)
+     VALUES ($1,$2,$3,COALESCE($4,0),$5,$6,COALESCE($7,0)) RETURNING *`,
+    [
+      st.service_key,
+      st.display_name,
+      st.description || null,
+      st.standard_cost_ngn === undefined ? null : st.standard_cost_ngn,
+      st.standard_turnaround_days === undefined
+        ? null
+        : st.standard_turnaround_days,
+      st.default_account_id || null,
+      st.display_order === undefined ? null : st.display_order,
+    ],
+  );
+  return rows[0];
+}
+async function updateServiceType({ brand, id, patch }) {
+  const allowed = [
+    "display_name",
+    "description",
+    "standard_cost_ngn",
+    "standard_turnaround_days",
+    "default_account_id",
+    "display_order",
+    "is_active",
+  ];
+  const sets = [];
+  const params = [];
+  let i = 1;
+  for (const k of allowed) {
+    if (patch[k] !== undefined) {
+      sets.push(`${k} = $${i++}`);
+      params.push(patch[k]);
+    }
+  }
+  if (!sets.length) return findServiceType({ brand, id });
+  params.push(id);
+  const { rows } = await query(
+    `UPDATE ${t(brand, "service_types")} SET ${sets.join(", ")}, updated_at = now()
+      WHERE service_type_id = $${i} RETURNING *`,
+    params,
+  );
   return rows[0] || null;
 }
 
-async function create({ client, brand, input, user_id }) {
-  // TODO: build INSERT with parameterised columns from `input`
-  throw new Error("TODO: implement service_jobs.create");
+// ── service_jobs ───────────────────────────────────────────
+async function createServiceJob({ client, brand, job }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "service_jobs")}
+       (job_number, service_type_id, hair_variant_id, hair_unit_id, hair_description,
+        sales_order_id, sales_order_line_id, customer_contact_id,
+        assigned_staff_user_id, assigned_stylist_id, is_intercompany,
+        intercompany_transaction_id, specification, recipe_id, status,
+        scheduled_for, expected_completion_at, agreed_cost_ngn, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,false),$12,$13,$14,
+             COALESCE($15,'pending'),$16,$17,$18,$19)
+     RETURNING *`,
+    [
+      job.job_number,
+      job.service_type_id,
+      job.hair_variant_id || null,
+      job.hair_unit_id || null,
+      job.hair_description || null,
+      job.sales_order_id || null,
+      job.sales_order_line_id || null,
+      job.customer_contact_id || null,
+      job.assigned_staff_user_id || null,
+      job.assigned_stylist_id || null,
+      job.is_intercompany === undefined ? null : job.is_intercompany,
+      job.intercompany_transaction_id || null,
+      job.specification ? JSON.stringify(job.specification) : null,
+      job.recipe_id || null,
+      job.status,
+      job.scheduled_for || null,
+      job.expected_completion_at || null,
+      job.agreed_cost_ngn === undefined ? null : job.agreed_cost_ngn,
+      job.created_by || null,
+    ],
+  );
+  return rows[0];
+}
+async function getServiceJob({ client, brand, id }) {
+  const { rows } = await ex(client)(
+    `SELECT j.*, st.display_name AS service_type_name, st.service_key
+       FROM ${t(brand, "service_jobs")} j
+       LEFT JOIN ${t(brand, "service_types")} st ON st.service_type_id = j.service_type_id
+      WHERE j.job_id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+async function listServiceJobs({
+  brand,
+  status,
+  assigned_staff_user_id,
+  assigned_stylist_id,
+  customer_contact_id,
+  page = 1,
+  page_size = 25,
+}) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (status) {
+    where.push(`status = $${i++}`);
+    params.push(status);
+  }
+  if (assigned_staff_user_id) {
+    where.push(`assigned_staff_user_id = $${i++}`);
+    params.push(assigned_staff_user_id);
+  }
+  if (assigned_stylist_id) {
+    where.push(`assigned_stylist_id = $${i++}`);
+    params.push(assigned_stylist_id);
+  }
+  if (customer_contact_id) {
+    where.push(`customer_contact_id = $${i++}`);
+    params.push(customer_contact_id);
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { rows: c } = await query(
+    `SELECT count(*)::int AS total FROM ${t(brand, "service_jobs")} ${w}`,
+    params,
+  );
+  const offset = (page - 1) * page_size;
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "service_jobs")} ${w}
+      ORDER BY created_at DESC LIMIT $${i++} OFFSET $${i}`,
+    [...params, page_size, offset],
+  );
+  return { data: rows, page, page_size, total: c[0].total };
+}
+async function serviceJobExistsForOrder({ client, brand, order_id }) {
+  const { rows } = await ex(client)(
+    `SELECT 1 FROM ${t(brand, "service_jobs")} WHERE sales_order_id = $1 LIMIT 1`,
+    [order_id],
+  );
+  return rows.length > 0;
+}
+async function setServiceJobStatus({ client, brand, id, status, fields = {} }) {
+  const set = ["status = $2"];
+  const params = [id, status];
+  let i = 3;
+  for (const [col, val] of Object.entries(fields)) {
+    set.push(`${col} = $${i++}`);
+    params.push(val);
+  }
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "service_jobs")} SET ${set.join(", ")}, updated_at = now()
+      WHERE job_id = $1 RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+}
+async function updateServiceJob({ client, brand, id, patch }) {
+  const allowed = [
+    "assigned_staff_user_id",
+    "assigned_stylist_id",
+    "hair_variant_id",
+    "hair_unit_id",
+    "hair_description",
+    "specification",
+    "recipe_id",
+    "recipe_override",
+    "scheduled_for",
+    "expected_completion_at",
+    "agreed_cost_ngn",
+  ];
+  const sets = [];
+  const params = [];
+  let i = 1;
+  for (const k of allowed) {
+    if (patch[k] !== undefined) {
+      const v =
+        (k === "specification" || k === "recipe_override") && patch[k] !== null
+          ? JSON.stringify(patch[k])
+          : patch[k];
+      sets.push(`${k} = $${i++}`);
+      params.push(v);
+    }
+  }
+  if (!sets.length) return getServiceJob({ client, brand, id });
+  params.push(id);
+  const { rows } = await ex(client)(
+    `UPDATE ${t(brand, "service_jobs")} SET ${sets.join(", ")}, updated_at = now()
+      WHERE job_id = $${i} RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
 }
 
-async function update({ client, brand, id, patch }) {
-  // TODO: build UPDATE with parameterised columns from `patch`
-  throw new Error("TODO: implement service_jobs.update");
-}
-
-async function archive({ client, brand, id }) {
-  const sql = `UPDATE ${tableFor(brand)}
-                  SET is_deleted = true, deleted_at = now()
-                WHERE service_types_id = $1`;
-  const exec = client ? client.query.bind(client) : query;
-  await exec(sql, [id]);
-}
-
-module.exports = { findAll, findById, create, update, archive };
+module.exports = {
+  nextNumber,
+  listServiceTypes,
+  getDefaultServiceType,
+  findServiceType,
+  createServiceType,
+  updateServiceType,
+  createServiceJob,
+  getServiceJob,
+  listServiceJobs,
+  serviceJobExistsForOrder,
+  setServiceJobStatus,
+  updateServiceJob,
+};

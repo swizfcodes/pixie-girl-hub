@@ -1,55 +1,44 @@
 /**
- * Faitlyn Service Job Tracker (V2.2 §6.24)
+ * Faitlyn Service Job Tracker (V2.2 §6.24) — routes. Mounted at
+ * /api/v1/service-jobs. Permission key: service_jobs.
  *
- * Module: service_jobs
- * Permission key: service_jobs
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   service_types, service_jobs
+ * Requiring the subscriber here registers `order.deposit_met → service job`
+ * once at boot (side-effect import; moved out of Production).
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./service-jobs.controller");
-const validator = require("./service-jobs.validator");
+const c = require("./service-jobs.controller");
+const v = require("./service-jobs.validator");
 const { requirePermission } = require("../../middleware/rbac");
+require("./service-jobs.subscribers");
 
 const router = express.Router();
+const can = (action) => requirePermission("service_jobs", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("service_jobs", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get(
-  "/:id",
-  requirePermission("service_jobs", "view"),
-  controller.getById,
-);
-
-// ── POST /            create ───────────────────────────────
+// ── Service types (literal segment before /:id) ────────────
+router.get("/types", can("view"), c.listServiceTypes);
 router.post(
-  "/",
-  requirePermission("service_jobs", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/types",
+  can("create"),
+  v.validateServiceTypeCreate,
+  c.createServiceType,
 );
-
-// ── PATCH /:id        update ───────────────────────────────
 router.patch(
-  "/:id",
-  requirePermission("service_jobs", "edit"),
-  validator.validateUpdate,
-  controller.update,
+  "/types/:id",
+  can("edit"),
+  v.validateServiceTypeUpdate,
+  c.updateServiceType,
 );
 
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("service_jobs", "delete"),
-  controller.archive,
-);
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+// ── Jobs ───────────────────────────────────────────────────
+router.get("/", can("view"), c.listJobs);
+router.post("/", can("create"), v.validateJobCreate, c.createJob);
+router.get("/:id", can("view"), c.getJob);
+router.patch("/:id", can("edit"), v.validateJobUpdate, c.updateJob);
+router.post("/:id/advance", can("edit"), v.validateJobAdvance, c.advanceJob);
+router.post("/:id/assign", can("edit"), v.validateAssignStaff, c.assignStaff);
+router.post("/:id/outcome", can("edit"), v.validateOutcome, c.recordOutcome);
 
 module.exports = router;
