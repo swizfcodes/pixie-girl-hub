@@ -36,12 +36,12 @@ async function main() {
       .readdirSync(MIG_DIR)
       .filter((f) => /^\d{6}_.+\.sql$/.test(f))
       .sort();
-    console.log(`Applying ${files.length} shared migrations…`);
+    process.stdout.write(`Applying ${files.length} shared migrations…\n`);
     for (const file of files) {
       const sql = fs.readFileSync(path.join(MIG_DIR, file), "utf-8");
       try {
         await client.query(sql);
-        console.log(`  ✓ ${file}`);
+        process.stdout.write(`  ✓ ${file}\n`);
       } catch (err) {
         console.error(`  ✗ ${file}: ${err.message}`);
         throw err;
@@ -50,7 +50,7 @@ async function main() {
     const { rows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM information_schema.tables WHERE table_schema = 'shared'`,
     );
-    console.log(`\nDone. shared schema has ${rows[0].n} tables.`);
+    process.stdout.write(`\nDone. shared schema has ${rows[0].n} tables.\n`);
   } finally {
     client.release();
     await pool.end();

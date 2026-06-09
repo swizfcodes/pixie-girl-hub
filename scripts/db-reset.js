@@ -13,10 +13,12 @@ if (process.env.NODE_ENV === "production") {
   process.exit(1);
 }
 
-console.log("Resetting database…");
+console.warn("Resetting database…");
 try {
   execSync("node scripts/db-drop.js", { stdio: "inherit" });
-} catch {}
+} catch {
+  // ignore errors from db-drop if the database does not exist
+}
 execSync("node scripts/db-create.js", { stdio: "inherit" });
 execSync("node scripts/migrate-shared.js", { stdio: "inherit" });
 execSync("node scripts/bootstrap-business.js pixiegirl", { stdio: "inherit" });

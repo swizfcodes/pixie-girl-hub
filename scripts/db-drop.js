@@ -19,7 +19,7 @@ async function main() {
     [dbName],
   );
   await client.query(`DROP DATABASE IF EXISTS ${dbName}`);
-  console.log(`Dropped database ${dbName}`);
+  console.warn(`Dropped database ${dbName}`);
   await client.end();
 }
 

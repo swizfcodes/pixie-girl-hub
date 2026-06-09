@@ -81,11 +81,11 @@ async function main() {
     }
     await client.query("COMMIT");
 
-    console.log(
+    console.warn(
       `✓ Seeded ${specs.length} workflow definitions × ${brands.length} brand(s) = ${count} rows`,
     );
     for (const { business_key } of brands) {
-      console.log(`  • ${business_key}`);
+      console.warn(`  • ${business_key}`);
     }
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

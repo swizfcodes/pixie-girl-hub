@@ -27,7 +27,7 @@ async function main() {
      ON CONFLICT (email) DO NOTHING`,
     [passwordHash],
   );
-  console.log("Seeded CEO user (ceo@pixiegirlglobal.com / see env)");
+  console.warn("Seeded CEO user (ceo@pixiegirlglobal.com / see env)");
   await pool.end();
 }
 

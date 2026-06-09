@@ -23,10 +23,10 @@ async function main() {
   await client.connect();
   try {
     await client.query(`CREATE DATABASE ${dbName}`);
-    console.log(`Created database ${dbName}`);
+    console.warn(`Created database ${dbName}`);
   } catch (err) {
     if (err.code === "42P04") {
-      console.log(`Database ${dbName} already exists`);
+      console.warn(`Database ${dbName} already exists`);
     } else {
       throw err;
     }
@@ -45,7 +45,7 @@ async function main() {
   await dbClient.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
   await dbClient.query(`CREATE EXTENSION IF NOT EXISTS "citext"`);
   await dbClient.query(`CREATE EXTENSION IF NOT EXISTS "vector"`);
-  console.log("Extensions enabled (pgcrypto, citext, vector)");
+  console.warn("Extensions enabled (pgcrypto, citext, vector)");
   await dbClient.end();
 }
 
