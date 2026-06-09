@@ -91,7 +91,7 @@ async function sendToCustomer({
   channel = "whatsapp",
   subject,
   body,
-  user,
+  // user,
   soft,
 }) {
   const contact = await repo.getContactChannelInfo({ contact_id });

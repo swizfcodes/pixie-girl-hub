@@ -51,6 +51,7 @@ const productionRouter = require("../modules/production/production.routes");
 const serviceJobsRouter = require("../modules/service_jobs/service-jobs.routes");
 const pricingRouter = require("../modules/pricing/pricing.routes");
 const stylistRouter = require("../modules/stylist_programme/stylist.routes");
+const stylistPortalRouter = require("../modules/stylist_programme/stylist.portal.routes");
 const orgWorkflowRouter = require("../shared/org_workflow/org.routes");
 const storefrontStudioRouter = require("../modules/storefront_studio/studio.routes");
 const intercompanyRouter = require("../modules/intercompany/intercompany.routes");
@@ -109,6 +110,9 @@ function mountRoutes(app) {
 
   // ── Auth (issues JWTs; no auth required to call) ───────
   app.use("/api/v1/auth", authRouter);
+
+  // ── Stylist portal (separate JWT class; self-authenticating) ──
+  app.use("/api/v1/stylist-portal", stylistPortalRouter);
 
   // ── Protected API surface ──────────────────────────────
   // All routes below require an authenticated user and a brand context.

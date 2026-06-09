@@ -115,3 +115,22 @@ event (notifications, smartcomm), feeds another module (social → smartcomm,
 newsletter → CRM), or reads the sales spine (marketing attribution). G-4 is
 fully closed at the core; remaining extension is broader role-routing of
 notifications (e.g. approvals → approver) and the G-7 delivery-letter PDF.
+
+---
+
+## 5. Pricing + Stylist batch — 2026-06-09 (§6.25, §6.26)
+
+| Module                       | New connection into system flow                                                                                                                                                                                                  |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Pricing Engine** (§6.25)   | `approveProposal` **writes back** `product_variants.price_*_ngn` (+ `min_price_ngn`) and appends `price_history`, so the **sales spine immediately prices new orders** at the approved number. `getEffectivePrice` is the resolver (override → list → floor clamp → charm rounding) storefront/POS/sales can call. Goal-seek + sensitivity scenarios; revert restores prior prices. |
+| **Stylist Programme** (§6.26) | Production `service_job.created` → `stylist.subscribers` opens a routing **assignment**; on `acceptOffer` the chosen stylist is **written back to `service_jobs.assigned_stylist_id`** (per-brand). Completed assignments roll into **payout batches**. Separate **portal JWT** class (not staff); public **badge verify**. |
+
+Mounts: `/api/v1/pricing`, `/api/v1/stylists` (admin, staff auth),
+`/api/v1/stylist-portal` (stylist JWT), public `/api/public/stylist-verify`.
+
+Connections, not silos: pricing approvals feed the variant price columns sales
+already reads; the stylist router consumes a production event and writes the
+assignment back onto the originating service_job. Both modules validated against
+schema/PRD/admin_ui; strict equality throughout. (Note: the WSL bash mount was
+stale during this build — the file tools, which are authoritative for the host
+workspace, confirmed every write landed complete.)

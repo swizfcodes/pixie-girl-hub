@@ -124,6 +124,7 @@ async function upsertMetrics({ brand, post_id, metric_date, m }) {
            video_views = EXCLUDED.video_views, link_clicks = EXCLUDED.link_clicks
      RETURNING *`,
     [
+      brand,
       post_id,
       metric_date,
       m.impressions,
@@ -136,7 +137,7 @@ async function upsertMetrics({ brand, post_id, metric_date, m }) {
       m.link_clicks,
     ],
   );
-  void ex;
+  // void ex;
   return rows[0];
 }
 async function listMetrics({ post_id }) {

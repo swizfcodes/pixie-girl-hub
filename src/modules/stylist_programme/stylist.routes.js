@@ -1,59 +1,98 @@
 /**
- * Stylist Partner Programme (V2.2 §6.26)
+ * Stylist Partner Programme (V2.2 §6.26) — ADMIN routes. Mounted at
+ * /api/v1/stylists under staff auth + brand context. Permission key:
+ * stylist_programme.
  *
- * Module: stylist_programme
- * Permission key: stylist_programme
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   stylist_partners, stylist_specialities, stylist_certifications, stylist_assignments, stylist_payouts
+ * Requiring the subscribers here registers the production → assignment
+ * routing connection once at boot (side-effect import).
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./stylist.controller");
-const validator = require("./stylist.validator");
+const c = require("./stylist.controller");
+const v = require("./stylist.validator");
 const { requirePermission } = require("../../middleware/rbac");
+require("./stylist.subscribers");
 
 const router = express.Router();
+const can = (action) => requirePermission("stylist_programme", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get(
-  "/",
-  requirePermission("stylist_programme", "view"),
-  controller.list,
-);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get(
-  "/:id",
-  requirePermission("stylist_programme", "view"),
-  controller.getById,
-);
-
-// ── POST /            create ───────────────────────────────
+// ── Assignments (routing) — literal segments before /:id ───
+router.get("/assignments/all", can("view"), c.listAssignments);
 router.post(
-  "/",
-  requirePermission("stylist_programme", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/assignments",
+  can("create"),
+  v.validateAssignmentOpen,
+  c.openAssignment,
+);
+router.get("/assignments/:id", can("view"), c.getAssignment);
+router.post(
+  "/assignments/:id/cancel",
+  can("edit"),
+  v.validateReason,
+  c.cancelAssignment,
+);
+router.post(
+  "/assignments/:id/rate",
+  can("edit"),
+  v.validateRating,
+  c.rateAssignment,
 );
 
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("stylist_programme", "edit"),
-  validator.validateUpdate,
-  controller.update,
+// ── Payouts ────────────────────────────────────────────────
+router.get("/payouts/all", can("view"), c.listPayouts);
+router.post(
+  "/payouts",
+  can("create"),
+  v.validatePayoutGenerate,
+  c.generatePayout,
+);
+router.get("/payouts/:id", can("view"), c.getPayout);
+router.post("/payouts/:id/approve", can("approve"), c.approvePayout);
+router.post(
+  "/payouts/:id/paid",
+  can("approve"),
+  v.validatePaid,
+  c.markPayoutPaid,
 );
 
-// ── DELETE /:id       archive/soft-delete ──────────────────
+// ── Partners ───────────────────────────────────────────────
+router.get("/", can("view"), c.listPartners);
+router.post("/", can("create"), v.validatePartnerCreate, c.createPartner);
+router.get("/:id", can("view"), c.getPartner);
+router.patch("/:id", can("edit"), v.validatePartnerUpdate, c.updatePartner);
+router.post("/:id/status", can("edit"), v.validateStatusChange, c.setStatus);
+router.post("/:id/badge", can("edit"), c.issueBadge);
+router.delete("/:id/badge", can("edit"), c.revokeBadge);
+
+// ── Specialities ───────────────────────────────────────────
+router.get("/:id/specialities", can("view"), c.listSpecialities);
+router.post(
+  "/:id/specialities",
+  can("edit"),
+  v.validateSpecialitySet,
+  c.setSpeciality,
+);
 router.delete(
-  "/:id",
-  requirePermission("stylist_programme", "delete"),
-  controller.archive,
+  "/:id/specialities/:speciality_id",
+  can("edit"),
+  c.removeSpeciality,
 );
 
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+// ── Certifications ─────────────────────────────────────────
+router.get("/:id/certifications", can("view"), c.listCertifications);
+router.post(
+  "/:id/certifications",
+  can("approve"),
+  v.validateCertAward,
+  c.awardCertification,
+);
+router.delete(
+  "/:id/certifications/:certification_id",
+  can("approve"),
+  v.validateReason,
+  c.revokeCertification,
+);
 
 module.exports = router;

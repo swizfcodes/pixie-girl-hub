@@ -1,51 +1,79 @@
 /**
- * Pricing Engine (V2.2 §6.25)
+ * Pricing Engine (V2.2 §6.25) — routes. Mounted at /api/v1/pricing.
+ * Permission key: pricing.
  *
- * Module: pricing
- * Permission key: pricing
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   pricing_rules, pricing_floors, cost_pass_through_rules, channel_price_overrides, price_proposals, price_history
+ * Rules / floors / channel overrides, the effective-price resolver (the
+ * storefront/POS/sales connection), goal-seek scenarios, and CEO-approved
+ * price proposals that apply back to product_variants.
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./pricing.controller");
-const validator = require("./pricing.validator");
+const c = require("./pricing.controller");
+const v = require("./pricing.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
 const router = express.Router();
+const can = (action) => requirePermission("pricing", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("pricing", "view"), controller.list);
+// ── Effective price + history (literals before any :id) ────
+router.get("/effective/:variant_id", can("view"), c.effectivePrice);
+router.get("/history/:variant_id", can("view"), c.priceHistory);
 
-// ── GET /:id          detail ───────────────────────────────
-router.get("/:id", requirePermission("pricing", "view"), controller.getById);
+// ── Rules ──────────────────────────────────────────────────
+router.get("/rules", can("view"), c.listRules);
+router.post("/rules", can("create"), v.validateRuleCreate, c.createRule);
+router.patch("/rules/:id", can("edit"), v.validateRuleUpdate, c.updateRule);
+router.delete("/rules/:id", can("delete"), c.deactivateRule);
 
-// ── POST /            create ───────────────────────────────
+// ── Floors ─────────────────────────────────────────────────
+router.get("/floors", can("view"), c.listFloors);
+router.post("/floors", can("create"), v.validateFloorSet, c.setFloor);
+router.delete("/floors/:id", can("delete"), c.removeFloor);
+
+// ── Channel overrides ──────────────────────────────────────
+router.get("/overrides", can("view"), c.listOverrides);
+router.post("/overrides", can("create"), v.validateOverrideSet, c.setOverride);
+router.delete("/overrides/:id", can("delete"), c.removeOverride);
+
+// ── Scenarios (goal-seek + sensitivity) ────────────────────
+router.get("/scenarios", can("view"), c.listScenarios);
 router.post(
-  "/",
-  requirePermission("pricing", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/scenarios",
+  can("create"),
+  v.validateScenarioCreate,
+  c.createScenario,
+);
+router.get("/scenarios/:id", can("view"), c.getScenario);
+router.post(
+  "/scenarios/:id/compute",
+  can("edit"),
+  v.validateCompute,
+  c.computeScenario,
 );
 
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("pricing", "edit"),
-  validator.validateUpdate,
-  controller.update,
+// ── Proposals (CEO approval → apply to variants) ───────────
+router.get("/proposals", can("view"), c.listProposals);
+router.post(
+  "/proposals",
+  can("create"),
+  v.validateProposalCreate,
+  c.createProposal,
 );
-
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("pricing", "delete"),
-  controller.archive,
+router.get("/proposals/:id", can("view"), c.getProposal);
+router.post("/proposals/:id/approve", can("approve"), c.approveProposal);
+router.post(
+  "/proposals/:id/reject",
+  can("approve"),
+  v.validateReason,
+  c.rejectProposal,
 );
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+router.post(
+  "/proposals/:id/revert",
+  can("approve"),
+  v.validateReason,
+  c.revertProposal,
+);
 
 module.exports = router;
