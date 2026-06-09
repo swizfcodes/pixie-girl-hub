@@ -1,63 +1,129 @@
 /**
- * Email Campaigns (V2.2 §6.16)
- * HTTP controller — translates req/res to service calls. No business logic here.
+ * Email Campaigns (V2.2 §6.16) — HTTP controller.
  */
 
 "use strict";
 
 const service = require("./email-campaigns.service");
+const { parsePagination } = require("../../utils/pagination");
 
-async function list(req, res) {
-  const result = await service.list({
-    brand: req.brand,
-    user: req.user,
-    scope: req.permission_scope,
-    filters: req.query,
-    page: parseInt(req.query.page || "1", 10),
-    page_size: Math.min(parseInt(req.query.page_size || "25", 10), 100),
-  });
-  res.json(result);
+const base = (req) => ({
+  brand: req.brand,
+  user: req.user,
+  request_id: req.request_id,
+});
+
+const VALID_BRANDS = new Set(["pixiegirl", "faitlynhair"]);
+function brandHint(req) {
+  const h = req.brand || req.headers["x-brand-context"] || req.query.brand;
+  return VALID_BRANDS.has(h) ? h : "pixiegirl";
 }
 
-async function getById(req, res) {
-  const item = await service.getById({
-    brand: req.brand,
-    user: req.user,
-    scope: req.permission_scope,
-    id: req.params.id,
+// Templates
+async function listTemplates(req, res) {
+  res.json({ data: await service.listTemplates({ brand: req.brand }) });
+}
+async function createTemplate(req, res) {
+  res.status(201).json({
+    data: await service.createTemplate({ ...base(req), input: req.body }),
   });
-  res.json({ data: item });
+}
+async function updateTemplate(req, res) {
+  res.json({
+    data: await service.updateTemplate({
+      ...base(req),
+      id: req.params.id,
+      patch: req.body,
+    }),
+  });
 }
 
-async function create(req, res) {
-  const created = await service.create({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    input: req.body,
+// Campaigns
+async function listCampaigns(req, res) {
+  const { page, page_size } = parsePagination(req.query);
+  res.json(
+    await service.listCampaigns({
+      brand: req.brand,
+      status: req.query.status,
+      page,
+      page_size,
+    }),
+  );
+}
+async function getCampaign(req, res) {
+  res.json({
+    data: await service.getCampaign({ brand: req.brand, id: req.params.id }),
   });
-  res.status(201).json({ data: created });
+}
+async function createCampaign(req, res) {
+  res.status(201).json({
+    data: await service.createCampaign({ ...base(req), input: req.body }),
+  });
+}
+async function buildRecipients(req, res) {
+  res.json({
+    data: await service.buildRecipients({
+      ...base(req),
+      id: req.params.id,
+      contact_ids: req.body.contact_ids,
+    }),
+  });
+}
+async function sendCampaign(req, res) {
+  res.json({
+    data: await service.sendCampaign({ ...base(req), id: req.params.id }),
+  });
+}
+async function pauseCampaign(req, res) {
+  res.json({
+    data: await service.setStatus({
+      ...base(req),
+      id: req.params.id,
+      status: "paused",
+    }),
+  });
+}
+async function cancelCampaign(req, res) {
+  res.json({
+    data: await service.setStatus({
+      ...base(req),
+      id: req.params.id,
+      status: "cancelled",
+    }),
+  });
+}
+async function recordEvent(req, res) {
+  res.json({
+    data: await service.recordEvent({
+      brand: req.brand,
+      campaign_id: req.params.id,
+      email: req.body.email,
+      event_type: req.body.event_type,
+    }),
+  });
 }
 
-async function update(req, res) {
-  const updated = await service.update({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    id: req.params.id,
-    patch: req.body,
+// Public newsletter
+async function subscribeNewsletter(req, res) {
+  res.status(201).json({
+    data: await service.subscribeNewsletter({
+      brand: brandHint(req),
+      input: req.body,
+    }),
   });
-  res.json({ data: updated });
 }
 
-async function archive(req, res) {
-  await service.archive({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    id: req.params.id,
-  });
-  res.status(204).end();
-}
-
-module.exports = { list, getById, create, update, archive };
+module.exports = {
+  listTemplates,
+  createTemplate,
+  updateTemplate,
+  listCampaigns,
+  getCampaign,
+  createCampaign,
+  buildRecipients,
+  sendCampaign,
+  pauseCampaign,
+  cancelCampaign,
+  recordEvent,
+  subscribeNewsletter,
+};

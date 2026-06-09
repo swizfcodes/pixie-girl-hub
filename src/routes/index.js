@@ -61,6 +61,7 @@ const retailPartnersRouter = require("../modules/retail_partners/partners.routes
 const cashRequestRouter = require("../modules/cash_request/cash-request.routes");
 const auditRouter = require("../shared/audit/audit.routes");
 const accessRouter = require("../shared/access/access.routes");
+const notificationsRouter = require("../shared/notifications/notifications.routes");
 
 // Public (storefront-facing, no auth)
 const publicCatalogueRouter = require("../modules/storefront/public.routes");
@@ -72,6 +73,7 @@ const publicReferralRouter = require("../modules/retention/referral.routes");
 const publicHairQuizRouter = require("../modules/retention/hair-quiz.routes");
 const publicCampaignRouter = require("../modules/sales_campaigns/campaigns.public.routes");
 const publicSignRouter = require("../shared/documents/documents.esign.public.routes");
+const publicNewsletterRouter = require("../modules/email_campaigns/newsletter.routes");
 
 // Webhooks
 const webhooksRouter = require("../modules/business_setup/webhooks.routes");
@@ -99,6 +101,7 @@ function mountRoutes(app) {
   publicRouter.use("/hair-quiz", publicHairQuizRouter);
   publicRouter.use("/sale", publicCampaignRouter);
   publicRouter.use("/sign", publicSignRouter);
+  publicRouter.use("/newsletter", publicNewsletterRouter);
   app.use("/api/public", publicRouter);
 
   // ── Webhooks (signed payloads; auth via signature, not JWT) ──
@@ -152,6 +155,7 @@ function mountRoutes(app) {
   api.use("/cash-request", cashRequestRouter);
   api.use("/audit", auditRouter);
   api.use("/access", accessRouter);
+  api.use("/notifications", notificationsRouter);
 
   app.use("/api/v1", api);
 }

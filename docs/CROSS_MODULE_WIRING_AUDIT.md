@@ -51,15 +51,15 @@ G-6 are module builds. G-1 depends on G-5. G-4/G-7 depend on Smartcomm/PDF.
 
 ## Status update — 2026-06-09 (this phase)
 
-| Gap | Status           | What landed                                                                                                                                                                                                                                    |
-| --- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G-1 | ✅ closed        | `order.deposit_met` → `production.subscribers` opens a styling service job.                                                                                                                                                                    |
-| G-2 | ✅ closed        | `logistics.subscribers` on `order.paid` auto-creates a dispatch delivery (default courier, order items + address).                                                                                                                             |
-| G-3 | ✅ closed        | `commission.subscribers` on `order.paid` → `payroll.accrueForOrder` resolves the rep + rule and accrues commission (channel-mapped, idempotent).                                                                                               |
-| G-5 | ✅ closed (core) | Production module built: runs (open/advance/cost/units/receive→`production_in` to Stock) + service jobs (create/advance) over §6.24 schema; cost roll-up via the existing trigger. Landed-cost breakdown / chemical recipes / rework deferred. |
-| G-6 | ✅ closed (core) | Intercompany module built: record cross-brand trade → mirrored GL in both ledgers (1210/4050 seller, 5060/2010 buyer) → match → settle → reconciliation; GL failures flagged as discrepancies.                                                 |
-| G-4 | ⏳ deferred      | Needs the Smartcomm dispatch connector (WhatsApp/email send).                                                                                                                                                                                  |
-| G-7 | ⏳ deferred      | Needs the delivery-letter PDF render at packing.                                                                                                                                                                                               |
+| Gap | Status                        | What landed                                                                                                                                                                                                                                                                                                                                                                       |
+| --- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G-1 | ✅ closed                     | `order.deposit_met` → `production.subscribers` opens a styling service job.                                                                                                                                                                                                                                                                                                       |
+| G-2 | ✅ closed                     | `logistics.subscribers` on `order.paid` auto-creates a dispatch delivery (default courier, order items + address).                                                                                                                                                                                                                                                                |
+| G-3 | ✅ closed                     | `commission.subscribers` on `order.paid` → `payroll.accrueForOrder` resolves the rep + rule and accrues commission (channel-mapped, idempotent).                                                                                                                                                                                                                                  |
+| G-5 | ✅ closed (core)              | Production module built: runs (open/advance/cost/units/receive→`production_in` to Stock) + service jobs (create/advance) over §6.24 schema; cost roll-up via the existing trigger. Landed-cost breakdown / chemical recipes / rework deferred.                                                                                                                                    |
+| G-6 | ✅ closed (core)              | Intercompany module built: record cross-brand trade → mirrored GL in both ledgers (1210/4050 seller, 5060/2010 buyer) → match → settle → reconciliation; GL failures flagged as discrepancies.                                                                                                                                                                                    |
+| G-4 | ✅ closed (core) — 2026-06-09 | Smartcomm dispatch built: `order.payment_reminder` → `smartcomm.sendToCustomer` (WhatsApp via provider, recorded on the customer thread). Notifications backbone fixed (the service was inserting columns that don't exist) + shared read API (`/api/v1/notifications`) + `order.paid` → salesperson fan-out. Staff role-routing (approvals→approver) is the remaining extension. |
+| G-7 | ⏳ deferred                   | Needs the delivery-letter PDF render at packing.                                                                                                                                                                                                                                                                                                                                  |
 
 Also delivered this phase: **Contacts 360** (`GET /contacts/:id/timeline` +
 `/summary`).
@@ -91,3 +91,27 @@ integrations, not wiring gaps.
 Contacts 360 (this phase, done): `GET /contacts/:id/timeline` + `/summary`
 aggregate every record across sales, quotations, invoices, receipts, POS,
 CRM, service jobs, deliveries, hair-quiz, loyalty, referrals, reviews.
+
+---
+
+## 4. Comms batch — 2026-06-09 (§6.14–6.17 + shared notifications)
+
+The communications cluster is built and wired into the spine; each module
+connects outward rather than living in a silo.
+
+| Module                      | New connection into system flow                                                                                                                                 |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Notifications** (shared)  | `order.paid` → salesperson fan-out; shared read API `/api/v1/notifications`. Backbone schema fixed. Closes G-4 core.                                            |
+| **Smartcomm** (§6.17)       | `order.payment_reminder` → `sendToCustomer` (WhatsApp/email, recorded on the customer thread). Owns shared message_channels/messages ("messaging" baked in).    |
+| **Email Campaigns** (§6.16) | Recipients built **from CRM contacts**; send via `email.service`; events tracked. Public **newsletter** subscribe → creates a CRM contact (`source='website'`). |
+| **Social Media** (§6.14)    | Inbound DM → `smartcomm.recordInboundFromCustomer` → bridged onto the customer's thread, linked to their contact (§6.1). Posts/metrics + connected accounts.    |
+| **Marketing** (§6.15)       | **Attribution report** joins `ad_spend_daily` to per-brand `sales_orders.utm_campaign` (matched on campaign name) → ROAS. Ad spend ties back to real revenue.   |
+
+Mounts: `/api/v1/notifications`, `/api/v1/smartcomm`, `/api/v1/email-campaigns`,
+`/api/v1/social`, `/api/v1/marketing`; public `/api/public/newsletter`.
+
+No new dead-ends introduced: every comms module either consumes a domain
+event (notifications, smartcomm), feeds another module (social → smartcomm,
+newsletter → CRM), or reads the sales spine (marketing attribution). G-4 is
+fully closed at the core; remaining extension is broader role-routing of
+notifications (e.g. approvals → approver) and the G-7 delivery-letter PDF.

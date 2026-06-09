@@ -1,63 +1,84 @@
 /**
- * Social Media Management (V2.2 §6.14)
- * HTTP controller — translates req/res to service calls. No business logic here.
+ * Social Media Management (V2.2 §6.14) — HTTP controller.
  */
 
 "use strict";
 
 const service = require("./social.service");
+const { parsePagination } = require("../../utils/pagination");
 
-async function list(req, res) {
-  const result = await service.list({
-    brand: req.brand,
-    user: req.user,
-    scope: req.permission_scope,
-    filters: req.query,
-    page: parseInt(req.query.page || "1", 10),
-    page_size: Math.min(parseInt(req.query.page_size || "25", 10), 100),
-  });
-  res.json(result);
+const base = (req) => ({
+  brand: req.brand,
+  user: req.user,
+  request_id: req.request_id,
+});
+
+async function listAccounts(req, res) {
+  res.json({ data: await service.listAccounts({ brand: req.brand }) });
 }
-
-async function getById(req, res) {
-  const item = await service.getById({
-    brand: req.brand,
-    user: req.user,
-    scope: req.permission_scope,
-    id: req.params.id,
+async function connectAccount(req, res) {
+  res.status(201).json({
+    data: await service.connectAccount({ ...base(req), input: req.body }),
   });
-  res.json({ data: item });
 }
-
-async function create(req, res) {
-  const created = await service.create({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    input: req.body,
-  });
-  res.status(201).json({ data: created });
-}
-
-async function update(req, res) {
-  const updated = await service.update({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    id: req.params.id,
-    patch: req.body,
-  });
-  res.json({ data: updated });
-}
-
-async function archive(req, res) {
-  await service.archive({
-    brand: req.brand,
-    user: req.user,
-    request_id: req.request_id,
-    id: req.params.id,
-  });
+async function revokeAccount(req, res) {
+  await service.revokeAccount({ ...base(req), id: req.params.id });
   res.status(204).end();
 }
+async function listPosts(req, res) {
+  const { page, page_size } = parsePagination(req.query);
+  res.json(
+    await service.listPosts({
+      brand: req.brand,
+      status: req.query.status,
+      page,
+      page_size,
+    }),
+  );
+}
+async function getPost(req, res) {
+  res.json({
+    data: await service.getPost({ brand: req.brand, id: req.params.id }),
+  });
+}
+async function createPost(req, res) {
+  res.status(201).json({
+    data: await service.createPost({ ...base(req), input: req.body }),
+  });
+}
+async function publishPost(req, res) {
+  res.json({
+    data: await service.publishPost({
+      ...base(req),
+      id: req.params.id,
+      external_post_id: req.body.external_post_id,
+    }),
+  });
+}
+async function recordMetrics(req, res) {
+  res.json({
+    data: await service.recordMetrics({
+      brand: req.brand,
+      id: req.params.id,
+      metric_date: req.body.metric_date,
+      metrics: req.body.metrics,
+    }),
+  });
+}
+async function ingestInboundDM(req, res) {
+  res.status(201).json({
+    data: await service.ingestInboundDM({ ...base(req), input: req.body }),
+  });
+}
 
-module.exports = { list, getById, create, update, archive };
+module.exports = {
+  listAccounts,
+  connectAccount,
+  revokeAccount,
+  listPosts,
+  getPost,
+  createPost,
+  publishPost,
+  recordMetrics,
+  ingestInboundDM,
+};

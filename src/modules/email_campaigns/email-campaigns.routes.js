@@ -1,55 +1,47 @@
 /**
- * Email Campaigns (V2.2 §6.16)
- *
- * Module: email_campaigns
- * Permission key: email_campaigns
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   email_templates, email_milestone_rules, email_campaigns, email_campaign_variants, email_campaign_recipients, email_campaign_events
+ * Email Campaigns (V2.2 §6.16) — routes. Mounted at /api/v1/email-campaigns.
+ * Permission key: email_campaigns. Templates + campaigns; recipients are built
+ * from contacts; sends go through the email provider; events roll up counters.
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./email-campaigns.controller");
-const validator = require("./email-campaigns.validator");
+const c = require("./email-campaigns.controller");
+const v = require("./email-campaigns.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
 const router = express.Router();
+const can = (action) => requirePermission("email_campaigns", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("email_campaigns", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get(
-  "/:id",
-  requirePermission("email_campaigns", "view"),
-  controller.getById,
-);
-
-// ── POST /            create ───────────────────────────────
+// Templates (admin-UI Tier-1 J)
+router.get("/templates", can("view"), c.listTemplates);
 router.post(
-  "/",
-  requirePermission("email_campaigns", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/templates",
+  can("create"),
+  v.validateTemplateCreate,
+  c.createTemplate,
 );
-
-// ── PATCH /:id        update ───────────────────────────────
 router.patch(
-  "/:id",
-  requirePermission("email_campaigns", "edit"),
-  validator.validateUpdate,
-  controller.update,
+  "/templates/:id",
+  can("edit"),
+  v.validateTemplateUpdate,
+  c.updateTemplate,
 );
 
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("email_campaigns", "delete"),
-  controller.archive,
+// Campaigns
+router.get("/", can("view"), c.listCampaigns);
+router.post("/", can("create"), v.validateCampaignCreate, c.createCampaign);
+router.get("/:id", can("view"), c.getCampaign);
+router.post(
+  "/:id/recipients",
+  can("edit"),
+  v.validateBuildRecipients,
+  c.buildRecipients,
 );
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+router.post("/:id/send", can("approve"), c.sendCampaign);
+router.post("/:id/pause", can("edit"), c.pauseCampaign);
+router.post("/:id/cancel", can("edit"), c.cancelCampaign);
+router.post("/:id/events", can("edit"), v.validateEventIngest, c.recordEvent);
 
 module.exports = router;

@@ -1,75 +1,161 @@
 /**
- * Social Media Management (V2.2 §6.14)
- * Repository — parameterised SQL only. No business logic, no HTTP.
- *
- * Conventions:
- *   - Every function takes a { client?, brand, ... } options object.
- *   - If `client` is provided, run within that transaction; else use the
- *     pool (via `query`).
- *   - All values bound with $1..$N placeholders. NEVER string-interpolate.
- *   - Schema names are switched by brand: pixiegirl.* or faitlynhair.*.
- *   - For shared tables (audit_log, contacts, etc.), use the `shared.` schema
- *     and filter by `business` column.
+ * Social Media Management (V2.2 §6.14) — repository.
+ * SHARED tables (business-scoped): social_accounts, social_posts,
+ * social_post_metrics. Parameterised SQL only.
  */
 
 "use strict";
 
 const { query } = require("../../config/database");
 
-const { VALID_BRANDS } = require("../../config/brands");
-
-function tableFor(brand) {
-  if (!VALID_BRANDS.has(brand)) throw new Error(`Invalid brand: ${brand}`);
-  return `${brand}.social_accounts`;
+// ── Accounts ───────────────────────────────────────────────
+async function createAccount({ brand, account }) {
+  const { rows } = await query(
+    `INSERT INTO shared.social_accounts
+       (business, platform, handle, external_account_id, scopes)
+     VALUES ($1,$2,$3,$4,COALESCE($5,'{}')) RETURNING *`,
+    [
+      brand,
+      account.platform,
+      account.handle,
+      account.external_account_id,
+      account.scopes,
+    ],
+  );
+  return rows[0];
 }
-
-async function findAll({
-  client,
-  brand,
-  scope,
-  user_id,
-  filters = {},
-  page = 1,
-  page_size = 25,
-}) {
-  // TODO: build dynamic WHERE based on filters + scope ('all' | 'team' | 'own')
-  const offset = (page - 1) * page_size;
-  const sql = `
-    SELECT *
-      FROM ${tableFor(brand)}
-     WHERE COALESCE(is_deleted, false) = false
-     ORDER BY created_at DESC
-     LIMIT $1 OFFSET $2
-  `;
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [page_size, offset]);
-  return { data: rows, page, page_size, total: rows.length }; // TODO: real count query
+async function listAccounts({ brand }) {
+  const { rows } = await query(
+    `SELECT account_id, business, platform, handle, external_account_id, scopes,
+            is_active, connected_at
+       FROM shared.social_accounts WHERE business = $1 ORDER BY platform, handle`,
+    [brand],
+  );
+  return rows;
 }
-
-async function findById({ client, brand, id }) {
-  const sql = `SELECT * FROM ${tableFor(brand)} WHERE social_accounts_id = $1 LIMIT 1`;
-  // NOTE: replace `social_accounts_id` with the actual PK name for this table
-  const exec = client ? client.query.bind(client) : query;
-  const { rows } = await exec(sql, [id]);
+async function deactivateAccount({ brand, id }) {
+  const { rows } = await query(
+    `UPDATE shared.social_accounts SET is_active = false
+      WHERE account_id = $1 AND business = $2 RETURNING account_id`,
+    [id, brand],
+  );
   return rows[0] || null;
 }
 
-async function create({ client, brand, input, user_id }) {
-  // TODO: build INSERT with parameterised columns from `input`
-  throw new Error("TODO: implement social_media.create");
+// ── Posts ──────────────────────────────────────────────────
+async function createPost({ brand, post }) {
+  const { rows } = await query(
+    `INSERT INTO shared.social_posts
+       (business, account_id, platform, post_type, caption, hashtags,
+        media_urls, tagged_product_ids, status, scheduled_for)
+     VALUES ($1,$2,$3,$4,$5,COALESCE($6,'{}'),COALESCE($7,'{}'),
+             COALESCE($8,'{}'),COALESCE($9,'draft'),$10) RETURNING *`,
+    [
+      brand,
+      post.account_id,
+      post.platform,
+      post.post_type,
+      post.caption || null,
+      post.hashtags,
+      post.media_urls,
+      post.tagged_product_ids,
+      post.status,
+      post.scheduled_for || null,
+    ],
+  );
+  return rows[0];
+}
+async function getPost({ brand, id }) {
+  const { rows } = await query(
+    `SELECT * FROM shared.social_posts WHERE post_id = $1 AND business = $2`,
+    [id, brand],
+  );
+  return rows[0] || null;
+}
+async function listPosts({ brand, status, page = 1, page_size = 25 }) {
+  const where = ["business = $1"];
+  const params = [brand];
+  let i = 2;
+  if (status) {
+    where.push(`status = $${i++}`);
+    params.push(status);
+  }
+  const w = `WHERE ${where.join(" AND ")}`;
+  const { rows: c } = await query(
+    `SELECT count(*)::int AS total FROM shared.social_posts ${w}`,
+    params,
+  );
+  const offset = (page - 1) * page_size;
+  const { rows } = await query(
+    `SELECT * FROM shared.social_posts ${w}
+      ORDER BY created_at DESC LIMIT $${i++} OFFSET $${i}`,
+    [...params, page_size, offset],
+  );
+  return { data: rows, page, page_size, total: c[0].total };
+}
+async function setPostStatus({ brand, id, status, fields = {} }) {
+  const set = ["status = $3"];
+  const params = [id, brand, status];
+  let i = 4;
+  for (const [col, val] of Object.entries(fields)) {
+    set.push(`${col} = $${i++}`);
+    params.push(val);
+  }
+  const { rows } = await query(
+    `UPDATE shared.social_posts SET ${set.join(", ")}, updated_at = now()
+      WHERE post_id = $1 AND business = $2 RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
 }
 
-async function update({ client, brand, id, patch }) {
-  // TODO: build UPDATE with parameterised columns from `patch`
-  throw new Error("TODO: implement social_media.update");
+// ── Metrics ────────────────────────────────────────────────
+async function upsertMetrics({ brand, post_id, metric_date, m }) {
+  const { rows } = await query(
+    `INSERT INTO shared.social_post_metrics
+       (post_id, metric_date, impressions, reach, likes, comments, shares, saves,
+        video_views, link_clicks)
+     VALUES ($1,$2,COALESCE($3,0),COALESCE($4,0),COALESCE($5,0),COALESCE($6,0),
+             COALESCE($7,0),COALESCE($8,0),COALESCE($9,0),COALESCE($10,0))
+     ON CONFLICT (post_id, metric_date) DO UPDATE
+       SET impressions = EXCLUDED.impressions, reach = EXCLUDED.reach,
+           likes = EXCLUDED.likes, comments = EXCLUDED.comments,
+           shares = EXCLUDED.shares, saves = EXCLUDED.saves,
+           video_views = EXCLUDED.video_views, link_clicks = EXCLUDED.link_clicks
+     RETURNING *`,
+    [
+      post_id,
+      metric_date,
+      m.impressions,
+      m.reach,
+      m.likes,
+      m.comments,
+      m.shares,
+      m.saves,
+      m.video_views,
+      m.link_clicks,
+    ],
+  );
+  void ex;
+  return rows[0];
+}
+async function listMetrics({ post_id }) {
+  const { rows } = await query(
+    `SELECT * FROM shared.social_post_metrics WHERE post_id = $1
+      ORDER BY metric_date DESC`,
+    [post_id],
+  );
+  return rows;
 }
 
-async function archive({ client, brand, id }) {
-  const sql = `UPDATE ${tableFor(brand)}
-                  SET is_deleted = true, deleted_at = now()
-                WHERE social_accounts_id = $1`;
-  const exec = client ? client.query.bind(client) : query;
-  await exec(sql, [id]);
-}
-
-module.exports = { findAll, findById, create, update, archive };
+module.exports = {
+  createAccount,
+  listAccounts,
+  deactivateAccount,
+  createPost,
+  getPost,
+  listPosts,
+  setPostStatus,
+  upsertMetrics,
+  listMetrics,
+};

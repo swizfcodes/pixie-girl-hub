@@ -1,51 +1,47 @@
 /**
- * Social Media Management (V2.2 §6.14)
- *
- * Module: social_media
- * Permission key: social
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   social_accounts, social_posts, social_post_metrics
+ * Social Media Management (V2.2 §6.14) — routes. Mounted at /api/v1/social.
+ * Permission key: social. Connected accounts + posts/metrics + inbound-DM
+ * bridge into Smartcomm (links DMs to the customer profile, §6.1).
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./social.controller");
-const validator = require("./social.validator");
+const c = require("./social.controller");
+const v = require("./social.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
 const router = express.Router();
+const can = (action) => requirePermission("social", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("social", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get("/:id", requirePermission("social", "view"), controller.getById);
-
-// ── POST /            create ───────────────────────────────
+// Accounts
+router.get("/accounts", can("view"), c.listAccounts);
 router.post(
-  "/",
-  requirePermission("social", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/accounts",
+  can("create"),
+  v.validateAccountConnect,
+  c.connectAccount,
+);
+router.delete("/accounts/:id", can("delete"), c.revokeAccount);
+
+// Posts
+router.get("/posts", can("view"), c.listPosts);
+router.post("/posts", can("create"), v.validatePostCreate, c.createPost);
+router.get("/posts/:id", can("view"), c.getPost);
+router.post(
+  "/posts/:id/publish",
+  can("edit"),
+  v.validatePublish,
+  c.publishPost,
+);
+router.post(
+  "/posts/:id/metrics",
+  can("edit"),
+  v.validateMetrics,
+  c.recordMetrics,
 );
 
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("social", "edit"),
-  validator.validateUpdate,
-  controller.update,
-);
-
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("social", "delete"),
-  controller.archive,
-);
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+// Inbound DM → Smartcomm (CRM §6.1)
+router.post("/dm/ingest", can("edit"), v.validateDmIngest, c.ingestInboundDM);
 
 module.exports = router;

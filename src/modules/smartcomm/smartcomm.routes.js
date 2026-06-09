@@ -1,11 +1,7 @@
 /**
- * Messaging Smartcomm (V2.2 §6.17)
- *
- * Module: smartcomm
- * Permission key: smartcomm
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   comms_threads, comms_messages
+ * Messaging Smartcomm (V2.2 §6.17) — routes. Mounted at /api/v1/smartcomm.
+ * Permission key: smartcomm. Internal channels + customer threads + outbound
+ * dispatch (WhatsApp/email). The shared `messaging` tables are owned here.
  */
 
 "use strict";
@@ -15,37 +11,25 @@ const controller = require("./smartcomm.controller");
 const validator = require("./smartcomm.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
+// Side-effect: register order.payment_reminder → customer dispatch (G-4).
+require("./smartcomm.subscribers");
+
 const router = express.Router();
+const can = (action) => requirePermission("smartcomm", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("smartcomm", "view"), controller.list);
-
-// ── GET /:id          detail ───────────────────────────────
-router.get("/:id", requirePermission("smartcomm", "view"), controller.getById);
-
-// ── POST /            create ───────────────────────────────
+router.get("/channels", can("view"), controller.listChannels);
+router.get("/channels/:id", can("view"), controller.getChannel);
 router.post(
-  "/",
-  requirePermission("smartcomm", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/channels/:id/messages",
+  can("edit"),
+  validator.validatePostMessage,
+  controller.postMessage,
 );
-
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("smartcomm", "edit"),
-  validator.validateUpdate,
-  controller.update,
+router.post(
+  "/send",
+  can("edit"),
+  validator.validateSendToCustomer,
+  controller.sendToCustomer,
 );
-
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("smartcomm", "delete"),
-  controller.archive,
-);
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
 
 module.exports = router;

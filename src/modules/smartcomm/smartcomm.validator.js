@@ -1,26 +1,36 @@
 /**
- * Messaging Smartcomm (V2.2 §6.17)
- * Input validators — Zod schemas wrapped in Express middleware.
+ * Messaging Smartcomm (V2.2 §6.17) — Zod validators.
  */
 
 "use strict";
 
 const { z } = require("zod");
 
-const createSchema = z.object({
-  // TODO: define required fields for create
-});
+const postMessage = z
+  .object({
+    content: z.string().min(1).max(8000),
+    message_type: z
+      .enum(["text", "image", "document", "voice_note", "video", "sticker"])
+      .optional(),
+    reply_to_id: z.string().uuid().optional(),
+  })
+  .strict();
 
-const updateSchema = createSchema.partial();
+const sendToCustomer = z
+  .object({
+    contact_id: z.string().uuid(),
+    channel: z.enum(["whatsapp", "email"]).optional(),
+    subject: z.string().max(200).optional(),
+    body: z.string().min(1).max(8000),
+  })
+  .strict();
 
-function validateCreate(req, _res, next) {
-  req.body = createSchema.parse(req.body);
+const mk = (schema) => (req, _res, next) => {
+  req.body = schema.parse(req.body || {});
   next();
-}
+};
 
-function validateUpdate(req, _res, next) {
-  req.body = updateSchema.parse(req.body);
-  next();
-}
-
-module.exports = { validateCreate, validateUpdate, createSchema, updateSchema };
+module.exports = {
+  validatePostMessage: mk(postMessage),
+  validateSendToCustomer: mk(sendToCustomer),
+};

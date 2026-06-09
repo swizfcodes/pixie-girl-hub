@@ -1,26 +1,90 @@
 /**
- * Email Campaigns (V2.2 §6.16)
- * Input validators — Zod schemas wrapped in Express middleware.
+ * Email Campaigns (V2.2 §6.16) — Zod validators.
  */
 
 "use strict";
 
 const { z } = require("zod");
 
-const createSchema = z.object({
-  // TODO: define required fields for create
-});
+const templateCreate = z
+  .object({
+    template_key: z.string().min(1).max(80),
+    display_name: z.string().min(1).max(160),
+    subject_line: z.string().min(1).max(300),
+    html_body: z.string().min(1),
+    available_variables: z.array(z.string()).optional(),
+    from_name: z.string().max(120).optional(),
+    from_email: z.string().email().optional(),
+    reply_to_email: z.string().email().optional(),
+    status: z.enum(["draft", "review", "approved", "archived"]).optional(),
+  })
+  .strict();
 
-const updateSchema = createSchema.partial();
+const templateUpdate = z
+  .object({
+    display_name: z.string().min(1).max(160).optional(),
+    subject_line: z.string().min(1).max(300).optional(),
+    html_body: z.string().min(1).optional(),
+    from_name: z.string().max(120).optional(),
+    from_email: z.string().email().optional(),
+    reply_to_email: z.string().email().optional(),
+    status: z.enum(["draft", "review", "approved", "archived"]).optional(),
+    is_active: z.boolean().optional(),
+  })
+  .strict();
 
-function validateCreate(req, _res, next) {
-  req.body = createSchema.parse(req.body);
+const campaignCreate = z
+  .object({
+    campaign_name: z.string().min(1).max(200),
+    campaign_type: z
+      .enum(["one_off", "recurring", "triggered", "milestone", "ab_test"])
+      .optional(),
+    segment_id: z.string().uuid().optional(),
+    default_template_id: z.string().uuid().optional(),
+    from_name: z.string().max(120).optional(),
+    from_email: z.string().email().optional(),
+    reply_to_email: z.string().email().optional(),
+    scheduled_for: z.string().datetime().optional(),
+  })
+  .strict();
+
+const buildRecipients = z
+  .object({ contact_ids: z.array(z.string().uuid()).optional() })
+  .strict();
+
+const eventIngest = z
+  .object({
+    email: z.string().email(),
+    event_type: z.enum([
+      "delivered",
+      "opened",
+      "clicked",
+      "bounced",
+      "unsubscribed",
+      "complained",
+    ]),
+  })
+  .strict();
+
+const newsletter = z
+  .object({
+    email: z.string().email(),
+    phone: z.string().min(4).max(40),
+    first_name: z.string().max(120).optional(),
+    last_name: z.string().max(120).optional(),
+  })
+  .strict();
+
+const mk = (schema) => (req, _res, next) => {
+  req.body = schema.parse(req.body || {});
   next();
-}
+};
 
-function validateUpdate(req, _res, next) {
-  req.body = updateSchema.parse(req.body);
-  next();
-}
-
-module.exports = { validateCreate, validateUpdate, createSchema, updateSchema };
+module.exports = {
+  validateTemplateCreate: mk(templateCreate),
+  validateTemplateUpdate: mk(templateUpdate),
+  validateCampaignCreate: mk(campaignCreate),
+  validateBuildRecipients: mk(buildRecipients),
+  validateEventIngest: mk(eventIngest),
+  validateNewsletter: mk(newsletter),
+};

@@ -24,11 +24,9 @@ async function getById(req, res) {
   res.json({ data: await service.getById({ id: req.params.id }) });
 }
 async function record(req, res) {
-  res
-    .status(201)
-    .json({
-      data: await service.recordTransaction({ ...base(req), input: req.body }),
-    });
+  res.status(201).json({
+    data: await service.recordTransaction({ ...base(req), input: req.body }),
+  });
 }
 async function match(req, res) {
   res.json({

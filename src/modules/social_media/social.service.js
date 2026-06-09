@@ -1,97 +1,169 @@
 /**
- * Social Media Management (V2.2 §6.14)
- * Business logic layer. Repos handle SQL; controllers handle HTTP.
- * This file is where:
- *   - Validation beyond shape (cross-field, against DB state)
- *   - Workflow routing (approval / multi-step)
- *   - Domain event emission (for real-time + AI)
- *   - Audit logging
- *   - Transaction orchestration
+ * Social Media Management (V2.2 §6.14) — business logic.
+ *
+ * Connected accounts, scheduled/published posts + metrics, and the §6.1
+ * integration: an inbound DM is bridged into the customer's Smartcomm thread,
+ * linked to their contact profile — so social conversations live in the Hub,
+ * not a silo.
  */
 
 "use strict";
 
 const repo = require("./social.repo");
 const events = require("./social.events");
+const smartcomm = require("../smartcomm/smartcomm.service");
 const { audit } = require("../../middleware/audit");
-const { transaction } = require("../../config/database");
 const { NotFoundError, AppError } = require("../../utils/errors");
 
-async function list({ brand, user, scope, filters, page, page_size }) {
-  return repo.findAll({
+const A = (
+  brand,
+  user,
+  action_key,
+  target_type,
+  target_id,
+  after,
+  request_id,
+) =>
+  audit({
+    business: brand,
+    user_id: user ? user.user_id : null,
+    action_key,
+    target_type,
+    target_id,
+    after,
+    request_id,
+  });
+
+// ── Accounts ───────────────────────────────────────────────
+function listAccounts({ brand }) {
+  return repo.listAccounts({ brand });
+}
+async function connectAccount({ brand, user, request_id, input }) {
+  const account = await repo.createAccount({ brand, account: input });
+  await A(
     brand,
-    scope,
-    user_id: user.user_id,
-    filters,
-    page,
-    page_size,
+    user,
+    "social.account.connect",
+    "social_account",
+    account.account_id,
+    { platform: input.platform },
+    request_id,
+  );
+  events.emit("account.connected", { brand, account_id: account.account_id });
+  return account;
+}
+async function revokeAccount({ brand, user, request_id, id }) {
+  const ok = await repo.deactivateAccount({ brand, id });
+  if (!ok) throw new NotFoundError("Social account");
+  await A(
+    brand,
+    user,
+    "social.account.revoke",
+    "social_account",
+    id,
+    null,
+    request_id,
+  );
+}
+
+// ── Posts ──────────────────────────────────────────────────
+function listPosts(args) {
+  return repo.listPosts(args);
+}
+async function getPost({ brand, id }) {
+  const p = await repo.getPost({ brand, id });
+  if (!p) throw new NotFoundError("Post");
+  p.metrics = await repo.listMetrics({ post_id: id });
+  return p;
+}
+async function createPost({ brand, user, request_id, input }) {
+  const status = input.scheduled_for ? "scheduled" : "draft";
+  const post = await repo.createPost({ brand, post: { ...input, status } });
+  await A(
+    brand,
+    user,
+    "social.post.create",
+    "social_post",
+    post.post_id,
+    { status },
+    request_id,
+  );
+  events.emit("post.created", { brand, post_id: post.post_id });
+  return post;
+}
+async function publishPost({ brand, user, request_id, id, external_post_id }) {
+  const p = await repo.getPost({ brand, id });
+  if (!p) throw new NotFoundError("Post");
+  const updated = await repo.setPostStatus({
+    brand,
+    id,
+    status: "published",
+    fields: {
+      published_at: new Date().toISOString(),
+      external_post_id: external_post_id || p.external_post_id,
+    },
+  });
+  await A(
+    brand,
+    user,
+    "social.post.publish",
+    "social_post",
+    id,
+    null,
+    request_id,
+  );
+  events.emit("post.published", { brand, post_id: id });
+  return updated;
+}
+async function recordMetrics({ brand, id, metric_date, metrics }) {
+  const p = await repo.getPost({ brand, id });
+  if (!p) throw new NotFoundError("Post");
+  return repo.upsertMetrics({
+    brand,
+    post_id: id,
+    metric_date: metric_date || new Date().toISOString().slice(0, 10),
+    m: metrics || {},
   });
 }
 
-async function getById({ brand, user, scope, id }) {
-  const item = await repo.findById({ brand, id, scope, user_id: user.user_id });
-  if (!item) throw new NotFoundError("SocialMedia");
-  return item;
-}
-
-async function create({ brand, user, request_id, input }) {
-  return transaction(async (client) => {
-    const created = await repo.create({
-      client,
-      brand,
-      user_id: user.user_id,
-      input,
-    });
-    await audit({
-      business: brand,
-      user_id: user.user_id,
-      action_key: "social_media.create",
-      target_type: "social_media",
-      target_id: created.id || created[Object.keys(created)[0]],
-      after: created,
-      request_id,
-    });
-    events.emit("created", { brand, item: created, user_id: user.user_id });
-    return created;
+/**
+ * §6.1 connection — bridge an inbound social DM into the customer's Smartcomm
+ * thread (linked to their contact). Requires a known contact_id.
+ */
+async function ingestInboundDM({ brand, user, request_id, input }) {
+  if (!input.contact_id)
+    throw new AppError(
+      "CONTACT_REQUIRED",
+      "A contact_id is required to link the DM to a profile",
+      422,
+    );
+  const result = await smartcomm.recordInboundFromCustomer({
+    brand,
+    contact_id: input.contact_id,
+    platform: input.platform || "instagram",
+    body: input.body,
+    external_ref: input.external_ref,
   });
+  await A(
+    brand,
+    user,
+    "social.dm.ingest",
+    "message",
+    result.message.message_id,
+    { contact_id: input.contact_id },
+    request_id,
+  );
+  return result;
 }
 
-async function update({ brand, user, request_id, id, patch }) {
-  return transaction(async (client) => {
-    const before = await repo.findById({ client, brand, id });
-    if (!before) throw new NotFoundError("SocialMedia");
-    const updated = await repo.update({ client, brand, id, patch });
-    await audit({
-      business: brand,
-      user_id: user.user_id,
-      action_key: "social_media.update",
-      target_type: "social_media",
-      target_id: id,
-      before,
-      after: updated,
-      request_id,
-    });
-    events.emit("updated", { brand, item: updated, user_id: user.user_id });
-    return updated;
-  });
-}
-
-async function archive({ brand, user, request_id, id }) {
-  return transaction(async (client) => {
-    const before = await repo.findById({ client, brand, id });
-    if (!before) throw new NotFoundError("SocialMedia");
-    await repo.archive({ client, brand, id });
-    await audit({
-      business: brand,
-      user_id: user.user_id,
-      action_key: "social_media.archive",
-      target_type: "social_media",
-      target_id: id,
-      before,
-      request_id,
-    });
-    events.emit("archived", { brand, id, user_id: user.user_id });
-  });
-}
-
-module.exports = { list, getById, create, update, archive };
+module.exports = {
+  listAccounts,
+  connectAccount,
+  revokeAccount,
+  listPosts,
+  getPost,
+  createPost,
+  publishPost,
+  recordMetrics,
+  ingestInboundDM,
+};

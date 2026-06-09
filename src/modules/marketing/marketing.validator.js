@@ -1,26 +1,62 @@
 /**
- * Marketing Campaigns & Ad Analytics (V2.2 §6.15)
- * Input validators — Zod schemas wrapped in Express middleware.
+ * Marketing Campaigns & Ad Analytics (V2.2 §6.15) — Zod validators.
  */
 
 "use strict";
 
 const { z } = require("zod");
 
-const createSchema = z.object({
-  // TODO: define required fields for create
-});
+const PLATFORM = ["google_ads", "meta_ads"];
 
-const updateSchema = createSchema.partial();
+const adAccountConnect = z
+  .object({
+    platform: z.enum(PLATFORM),
+    external_account_id: z.string().min(1).max(200),
+    display_name: z.string().min(1).max(160),
+    currency: z.string().length(3).optional(),
+  })
+  .strict();
 
-function validateCreate(req, _res, next) {
-  req.body = createSchema.parse(req.body);
+const adCampaignCreate = z
+  .object({
+    ad_account_id: z.string().uuid(),
+    platform: z.enum(PLATFORM),
+    external_campaign_id: z.string().min(1).max(200),
+    name: z.string().min(1).max(200),
+    objective: z.string().max(60).optional(),
+    status: z
+      .enum(["draft", "active", "paused", "ended", "removed"])
+      .optional(),
+    budget_amount: z.coerce.number().nonnegative().optional(),
+    budget_currency: z.string().length(3).optional(),
+  })
+  .strict();
+
+const statusChange = z
+  .object({ status: z.enum(["draft", "active", "paused", "ended", "removed"]) })
+  .strict();
+
+const spend = z
+  .object({
+    metric_date: z.string().date().optional(),
+    spend_amount: z.coerce.number().nonnegative().optional(),
+    spend_ngn: z.coerce.number().nonnegative().optional(),
+    impressions: z.coerce.number().int().nonnegative().optional(),
+    clicks: z.coerce.number().int().nonnegative().optional(),
+    conversions: z.coerce.number().int().nonnegative().optional(),
+    conversion_value: z.coerce.number().nonnegative().optional(),
+    conversion_value_ngn: z.coerce.number().nonnegative().optional(),
+  })
+  .strict();
+
+const mk = (schema) => (req, _res, next) => {
+  req.body = schema.parse(req.body || {});
   next();
-}
+};
 
-function validateUpdate(req, _res, next) {
-  req.body = updateSchema.parse(req.body);
-  next();
-}
-
-module.exports = { validateCreate, validateUpdate, createSchema, updateSchema };
+module.exports = {
+  validateAdAccountConnect: mk(adAccountConnect),
+  validateAdCampaignCreate: mk(adCampaignCreate),
+  validateStatusChange: mk(statusChange),
+  validateSpend: mk(spend),
+};

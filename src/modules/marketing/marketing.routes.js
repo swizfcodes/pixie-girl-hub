@@ -1,55 +1,52 @@
 /**
- * Marketing Campaigns & Ad Analytics (V2.2 §6.15)
- *
- * Module: marketing
- * Permission key: ad_analytics
- *
- * Backing tables (per-brand or shared as documented in schema):
- *   ad_accounts, ad_campaigns
+ * Marketing Campaigns & Ad Analytics (V2.2 §6.15) — routes. Mounted at
+ * /api/v1/marketing. Permission key: ad_analytics. Ad accounts + campaigns +
+ * daily spend + the sales-attribution report (spend ↔ revenue by utm_campaign).
  */
 
 "use strict";
 
 const express = require("express");
-const controller = require("./marketing.controller");
-const validator = require("./marketing.validator");
+const c = require("./marketing.controller");
+const v = require("./marketing.validator");
 const { requirePermission } = require("../../middleware/rbac");
 
 const router = express.Router();
+const can = (action) => requirePermission("ad_analytics", action);
 
-// ── GET /             list ─────────────────────────────────
-router.get("/", requirePermission("ad_analytics", "view"), controller.list);
+// Attribution (spend vs sales) — literal before any :id.
+router.get("/attribution", can("view"), c.attributionReport);
 
-// ── GET /:id          detail ───────────────────────────────
-router.get(
-  "/:id",
-  requirePermission("ad_analytics", "view"),
-  controller.getById,
-);
-
-// ── POST /            create ───────────────────────────────
+// Ad accounts
+router.get("/ad-accounts", can("view"), c.listAdAccounts);
 router.post(
-  "/",
-  requirePermission("ad_analytics", "create"),
-  validator.validateCreate,
-  controller.create,
+  "/ad-accounts",
+  can("create"),
+  v.validateAdAccountConnect,
+  c.connectAdAccount,
 );
+router.delete("/ad-accounts/:id", can("delete"), c.revokeAdAccount);
 
-// ── PATCH /:id        update ───────────────────────────────
-router.patch(
-  "/:id",
-  requirePermission("ad_analytics", "edit"),
-  validator.validateUpdate,
-  controller.update,
+// Ad campaigns
+router.get("/ad-campaigns", can("view"), c.listAdCampaigns);
+router.post(
+  "/ad-campaigns",
+  can("create"),
+  v.validateAdCampaignCreate,
+  c.createAdCampaign,
 );
-
-// ── DELETE /:id       archive/soft-delete ──────────────────
-router.delete(
-  "/:id",
-  requirePermission("ad_analytics", "delete"),
-  controller.archive,
+router.get("/ad-campaigns/:id", can("view"), c.getAdCampaign);
+router.post(
+  "/ad-campaigns/:id/status",
+  can("edit"),
+  v.validateStatusChange,
+  c.setAdCampaignStatus,
 );
-
-// TODO: module-specific endpoints (state transitions, sub-resources, etc.)
+router.post(
+  "/ad-campaigns/:id/spend",
+  can("edit"),
+  v.validateSpend,
+  c.recordSpend,
+);
 
 module.exports = router;
