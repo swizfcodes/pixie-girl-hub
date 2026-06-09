@@ -5,6 +5,7 @@
 "use strict";
 
 const service = require("./catalogue.service");
+const mediaService = require("../../services/media.service");
 const { parsePagination } = require("../../utils/pagination");
 
 const base = (req) => ({
@@ -240,6 +241,15 @@ const removeVideo = async (req, res) => {
   });
   res.status(204).end();
 };
+const uploadMedia = async (req, res) =>
+  res.status(201).json({
+    data: await mediaService.registerUpload({
+      brand: req.brand,
+      user: req.user,
+      file: req.file,
+      meta: req.body || {},
+    }),
+  });
 const listMediaVideoLibrary = async (req, res) =>
   res.json({
     data: await service.listMediaVideoLibrary({ brand: req.brand }),
@@ -345,6 +355,7 @@ module.exports = {
   listVideos,
   addVideo,
   removeVideo,
+  uploadMedia,
   listMediaVideoLibrary,
   attachVideoFromMedia,
   getSeo,

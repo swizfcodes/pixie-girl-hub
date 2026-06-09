@@ -30,6 +30,7 @@ const { Queue, Worker } = require("bullmq");
 const { config } = require("../config/env");
 const { logger } = require("../config/logger");
 const { getClient: getRedisClient } = require("../config/redis");
+const { refreshBrands } = require("../config/brands");
 
 const queueNames = [
   "media-processing",
@@ -51,6 +52,10 @@ function getQueue(name) {
 
 async function startWorkers() {
   const connection = getRedisClient();
+
+  // Load the brand registry before any cron fans out across brands. Safe to
+  // call even if the host process already refreshed it at boot.
+  await refreshBrands();
 
   // Initialise queues
   for (const name of queueNames) {
@@ -116,7 +121,12 @@ async function startWorkers() {
   const {
     runCampaignMetricsRollup,
   } = require("./schedulers/campaign-metrics-rollup");
+  const { runUgcIngestionSweep } = require("./schedulers/ugc-ingest");
 
+  // Re-sync the brand registry so a business provisioned by the API process
+  // reaches this worker's crons without a restart.
+  scheduleCron("brand-registry-refresh", "*/5 * * * *", refreshBrands);
+  scheduleCron("ugc-ingestion", "*/10 * * * *", runUgcIngestionSweep);
   scheduleCron("daily-ai-briefing", "0 7 * * *", runDailyAiBriefing);
   scheduleCron("weekly-sales-report", "0 20 * * 6", runWeeklySalesReport);
   scheduleCron("weekly-customer-report", "0 20 * * 6", runWeeklyCustomerReport);

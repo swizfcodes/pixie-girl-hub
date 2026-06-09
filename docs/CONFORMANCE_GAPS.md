@@ -64,11 +64,11 @@ Preceded by a brand-registry refactor: the hardcoded `new Set(["pixiegirl",
 brand goes live without code edits. New migrations: `000112` (email-signature
 template column).
 
-| ID   | Item                                 | State   | What landed                                                                                                                                                                                                                                                |
-| ---- | ------------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ID   | Item                                 | State   | What landed                                                                                                                                                                                                                                                         |
+| ---- | ------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | W-11 | **"Add a new business" flow** (6.21) | ✅ done | `GET/POST /api/v1/business-setup/businesses` — `business-provision.service` validates the key, creates the schema, seeds `business_config`, applies every template, verifies table count, and `registerBrand()`s it live. Rolls back a half-built brand on failure. |
-| W-12 | **Email-signature builder** (6.13)   | ✅ done | One brand template (`business_config.email_signature_template`, migration 000112) + per-staff render into `shared.email_signatures`. Endpoints under business-setup: GET/PUT template, list/get/PUT-generate per user (token merge, HTML-escaped).            |
-| W-13 | **Catalogue UGC video wiring** (6.4) | ✅ done | `GET /catalogue/products/:id/video-library` (ready `media_assets` videos) + `POST /products/:id/videos/from-media` attaches a self-hosted asset as a `direct_upload` product video (external_ref = asset_id, embed_url = storage_path). No schema change.    |
+| W-12 | **Email-signature builder** (6.13)   | ✅ done | One brand template (`business_config.email_signature_template`, migration 000112) + per-staff render into `shared.email_signatures`. Endpoints under business-setup: GET/PUT template, list/get/PUT-generate per user (token merge, HTML-escaped).                  |
+| W-13 | **Catalogue UGC video wiring** (6.4) | ✅ done | `GET /catalogue/products/:id/video-library` (ready `media_assets` videos) + `POST /products/:id/videos/from-media` attaches a self-hosted asset as a `direct_upload` product video (external_ref = asset_id, embed_url = storage_path). No schema change.           |
 
 ---
 
@@ -87,11 +87,25 @@ template column).
 3. ~~**P3 admin (W-11…W-13)**~~ — ✅ SHIPPED 2026-06-08 (see table above),
    preceded by the brand-registry refactor (`src/config/brands.js`).
 
-**The W-1…W-13 wiring-lag queue is now fully cleared.** Remaining follow-ups
-are operational, not feature gaps: wire `refreshBrands()` into server +
-worker boot and call it after provisioning; the layaway/UGC background
-workers (FFmpeg media processing) still need their job processors; and the
-doc-hygiene counts below.
+**The W-1…W-13 wiring-lag queue is now fully cleared.** Brand-registry boot
+wiring is also done: `refreshBrands()` runs at server startup (after
+`initDatabase`) and at worker start, plus a 5-minute `brand-registry-refresh`
+cron so a business provisioned by the API process reaches the worker's crons
+without a restart.
+
+**Media pipeline shipped 2026-06-08:** the `media-processing` BullMQ worker
+now does real FFmpeg work — probe + transcode (H.264/AAC, ≤720p, faststart)
+
+- poster/thumbnail — moving `media_assets` from `pending` → `ready`
+  (`media.ffmpeg.js`, `media.repo.js`, `media-processor.js`). `media.service`
+  (producer) registers uploads (`POST /catalogue/media`) and remote buffers and
+  enqueues them; a `ugc-ingestion` cron drains `ugc_ingestion_queue` (direct_url
+  downloads → asset → enqueue → `ready_for_moderation`; platform sources flagged
+  for the social-API connector). The W-13 video-library reads the resulting
+  `ready` assets.
+
+Remaining follow-ups are operational only: the social-platform UGC connector
+(Instagram/TikTok capture) and the doc-hygiene counts below.
 
 See `migrations/CHANGELOG.md` for what shipped and `VERIFICATION_REPORT.md`
 for the per-module evidence behind this list.

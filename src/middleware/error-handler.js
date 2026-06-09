@@ -21,8 +21,7 @@ function notFoundHandler(req, res) {
   });
 }
 
-// 4-arg signature is required for Express to recognise this as error handler
-// eslint-disable-next-line no-unused-vars
+// 4-arg signature is required for Express to recognise this as error handler eslint-disable-next-line no-unused-vars
 function errorHandler(err, req, res, _next) {
   const request_id = req.request_id;
 

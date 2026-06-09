@@ -130,6 +130,9 @@ router.patch(
 );
 router.delete("/products/:id/images/:imageId", can("edit"), c.removeImage);
 
+// Self-hosted media upload → stored + queued for FFmpeg processing (W-13).
+router.post("/media", can("edit"), upload.single("file"), c.uploadMedia);
+
 // Product videos
 router.get("/products/:id/videos", can("view"), c.listVideos);
 // Self-hosted UGC video library + attach (W-13). Literal segment before :videoId.

@@ -14,7 +14,7 @@
 "use strict";
 
 const { logger } = require("../config/logger");
-const { ROOMS } = require("./rooms");
+//const { ROOMS } = require("./rooms");
 
 // Whitelist: room patterns that any authenticated user can subscribe to.
 // More sensitive rooms (system:ai_usage_meter, payroll-related) are gated below.

@@ -23,6 +23,7 @@ const express = require("express");
 const { config, validateEnv } = require("./config/env");
 const { logger } = require("./config/logger");
 const { initDatabase, closeDatabase } = require("./config/database");
+const { refreshBrands } = require("./config/brands");
 const { initRedis, closeRedis } = require("./config/redis");
 const { initSocketIo, closeSocketIo } = require("./config/socket");
 
@@ -39,6 +40,11 @@ async function bootstrap() {
   // ── Initialise external connections ────────────────────
   await initDatabase();
   logger.info("database connected");
+
+  // ── Load the brand registry from business_config (W-11) ─
+  // Must come after the DB pool is up and before requests/crons so every
+  // per-brand guard sees the full, current set of brands.
+  await refreshBrands();
 
   await initRedis();
   logger.info("redis connected");
