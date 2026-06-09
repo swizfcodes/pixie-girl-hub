@@ -168,12 +168,46 @@ const pipelineStageUpdate = pipelineStageCreate
   .partial()
   .strict();
 
+// ── Business provisioning (V2.2 §6.21 "add a new business") ──
+const businessProvision = z
+  .object({
+    business_key: z
+      .string()
+      .regex(
+        /^[a-z][a-z0-9_]{1,62}$/,
+        "lowercase letter then letters/digits/underscore",
+      ),
+    display_name: z.string().min(1).max(200),
+    legal_name: z.string().min(1).max(200),
+    document_prefix: z.string().min(1).max(10),
+    trading_currency: z.string().length(3).optional(),
+    settlement_currency: z.string().length(3).optional(),
+    vat_rate: rate.optional(),
+    wht_rate: rate.optional(),
+  })
+  .strict();
+
+// ── Email signatures (V2.2 §6.13) ────────────────────────
+const signatureTemplate = z
+  .object({ html: z.string().min(1).max(20000) })
+  .strict();
+const signatureGenerate = z
+  .object({
+    full_name: z.string().min(1).max(200),
+    job_title: z.string().min(1).max(200),
+    phone: z.string().max(40).optional(),
+  })
+  .strict();
+
 const mw = (schema) => (req, _res, next) => {
   req.body = schema.parse(req.body ?? {});
   next();
 };
 
 module.exports = {
+  validateBusinessProvision: mw(businessProvision),
+  validateSignatureTemplate: mw(signatureTemplate),
+  validateSignatureGenerate: mw(signatureGenerate),
   validateConfigUpdate: mw(configUpdate),
   validateCurrencySave: mw(currencySave),
   validateCurrencyUpdate: mw(currencyUpdate),

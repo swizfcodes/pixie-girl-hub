@@ -5,6 +5,54 @@
 "use strict";
 
 const service = require("./business-setup.service");
+const provisionService = require("./business-provision.service");
+const sigService = require("./email-signature.service");
+
+// ── Email signatures (V2.2 §6.13) ────────────────────────
+const getSignatureTemplate = async (req, res) =>
+  res.json({ data: await sigService.getTemplate({ brand: req.brand }) });
+const setSignatureTemplate = async (req, res) =>
+  res.json({
+    data: await sigService.setTemplate({
+      brand: req.brand,
+      user: req.user,
+      request_id: req.request_id,
+      html: req.body.html,
+    }),
+  });
+const listSignatures = async (req, res) =>
+  res.json({ data: await sigService.listSignatures({ brand: req.brand }) });
+const getSignature = async (req, res) =>
+  res.json({
+    data: await sigService.getSignature({
+      brand: req.brand,
+      user_id: req.params.userId,
+    }),
+  });
+const generateSignature = async (req, res) =>
+  res.json({
+    data: await sigService.generateSignature({
+      brand: req.brand,
+      user: req.user,
+      request_id: req.request_id,
+      user_id: req.params.userId,
+      full_name: req.body.full_name,
+      job_title: req.body.job_title,
+      phone: req.body.phone,
+    }),
+  });
+
+// ── Businesses (provisioning — V2.2 §6.21 "add a new business") ──
+const listBusinesses = async (_req, res) =>
+  res.json({ data: await provisionService.listBusinesses() });
+const provisionBusiness = async (req, res) =>
+  res.status(201).json({
+    data: await provisionService.provisionBusiness({
+      input: req.body,
+      user: req.user,
+      request_id: req.request_id,
+    }),
+  });
 
 const base = (req) => ({
   brand: req.brand,
@@ -176,6 +224,13 @@ const deletePipelineStage = async (req, res) =>
   });
 
 module.exports = {
+  listBusinesses,
+  provisionBusiness,
+  getSignatureTemplate,
+  setSignatureTemplate,
+  listSignatures,
+  getSignature,
+  generateSignature,
   getConfig,
   updateConfig,
   listCurrencies,

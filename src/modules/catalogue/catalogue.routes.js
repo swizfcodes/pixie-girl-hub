@@ -132,6 +132,14 @@ router.delete("/products/:id/images/:imageId", can("edit"), c.removeImage);
 
 // Product videos
 router.get("/products/:id/videos", can("view"), c.listVideos);
+// Self-hosted UGC video library + attach (W-13). Literal segment before :videoId.
+router.get("/products/:id/video-library", can("view"), c.listMediaVideoLibrary);
+router.post(
+  "/products/:id/videos/from-media",
+  can("edit"),
+  v.validateVideoFromMedia,
+  c.attachVideoFromMedia,
+);
 router.post(
   "/products/:id/videos",
   can("edit"),

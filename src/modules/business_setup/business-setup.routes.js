@@ -17,6 +17,37 @@ const { requirePermission } = require("../../middleware/rbac");
 const router = express.Router();
 const can = (action) => requirePermission("business_setup", action);
 
+// ── Businesses (provision a new brand — V2.2 §6.21) ──────
+// Runs DDL (schema + templates) → CEO-level; gated on business_setup:create.
+router.get("/businesses", can("view"), controller.listBusinesses);
+router.post(
+  "/businesses",
+  can("create"),
+  validator.validateBusinessProvision,
+  controller.provisionBusiness,
+);
+
+// ── Email signatures (one brand template, per-staff render — §6.13) ──
+router.get(
+  "/email-signature-template",
+  can("view"),
+  controller.getSignatureTemplate,
+);
+router.put(
+  "/email-signature-template",
+  can("edit"),
+  validator.validateSignatureTemplate,
+  controller.setSignatureTemplate,
+);
+router.get("/email-signatures", can("view"), controller.listSignatures);
+router.get("/email-signatures/:userId", can("view"), controller.getSignature);
+router.put(
+  "/email-signatures/:userId",
+  can("edit"),
+  validator.validateSignatureGenerate,
+  controller.generateSignature,
+);
+
 // ── Brand profile ────────────────────────────────────────
 router.get("/config", can("view"), controller.getConfig);
 router.patch(

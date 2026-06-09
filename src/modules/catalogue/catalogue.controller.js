@@ -240,6 +240,18 @@ const removeVideo = async (req, res) => {
   });
   res.status(204).end();
 };
+const listMediaVideoLibrary = async (req, res) =>
+  res.json({
+    data: await service.listMediaVideoLibrary({ brand: req.brand }),
+  });
+const attachVideoFromMedia = async (req, res) =>
+  res.status(201).json({
+    data: await service.attachVideoFromMedia({
+      ...base(req),
+      id: req.params.id,
+      input: req.body,
+    }),
+  });
 
 // SEO
 const getSeo = async (req, res) =>
@@ -333,6 +345,8 @@ module.exports = {
   listVideos,
   addVideo,
   removeVideo,
+  listMediaVideoLibrary,
+  attachVideoFromMedia,
   getSeo,
   upsertSeo,
   listAttributeValues,

@@ -11,7 +11,7 @@ const events = require("./catalogue.events");
 const documents = require("../../shared/documents/documents.service");
 const { audit } = require("../../middleware/audit");
 const { transaction } = require("../../config/database");
-const { NotFoundError } = require("../../utils/errors");
+const { NotFoundError, AppError } = require("../../utils/errors");
 
 const A = (
   brand,
@@ -493,6 +493,63 @@ async function removeVideo({ brand, user, request_id, id, video_id }) {
   );
 }
 
+// ── Self-hosted UGC video (W-13) ─────────────────────────
+/** Ready, non-archived self-hosted video assets available to attach. */
+function listMediaVideoLibrary({ brand }) {
+  return repo.listReadyVideoAssets({ brand });
+}
+
+/**
+ * Attach a self-hosted media asset to a product as a video. Reuses the
+ * product_videos row with source='direct_upload': external_ref holds the
+ * media_asset_id, embed_url holds the storage path the media server serves.
+ */
+async function attachVideoFromMedia({ brand, user, request_id, id, input }) {
+  await getProduct({ brand, id });
+  const asset = await repo.getMediaAsset({
+    brand,
+    asset_id: input.media_asset_id,
+  });
+  if (!asset) throw new NotFoundError("Media asset");
+  if (asset.asset_kind !== "video")
+    throw new AppError("NOT_A_VIDEO", "Media asset is not a video", 422);
+  if (asset.processing_status !== "ready")
+    throw new AppError(
+      "ASSET_NOT_READY",
+      `Media asset is '${asset.processing_status}', not ready`,
+      409,
+    );
+  const v = await repo.addVideo({
+    brand,
+    video: {
+      product_id: id,
+      source: "direct_upload",
+      external_ref: asset.asset_id,
+      embed_url: asset.storage_path,
+      thumbnail_url: asset.poster_path || asset.thumbnail_path || null,
+      title: input.title || null,
+      caption: input.caption || asset.caption || null,
+      duration_seconds:
+        asset.duration_sec !== null
+          ? Math.round(Number(asset.duration_sec))
+          : null,
+      display_order: input.display_order,
+      is_primary: input.is_primary,
+      added_by: user.user_id,
+    },
+  });
+  await A(
+    brand,
+    user.user_id,
+    "catalogue.video.attach_media",
+    "product_video",
+    v.video_id,
+    v,
+    request_id,
+  );
+  return v;
+}
+
 // ── SEO ──────────────────────────────────────────────────
 async function getSeo({ brand, id }) {
   await getProduct({ brand, id });
@@ -614,6 +671,8 @@ module.exports = {
   listVideos,
   addVideo,
   removeVideo,
+  listMediaVideoLibrary,
+  attachVideoFromMedia,
   getSeo,
   upsertSeo,
   listAttributeValues,

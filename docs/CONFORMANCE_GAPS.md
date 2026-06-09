@@ -49,20 +49,26 @@ migration: `000111_shared_cash_request_threshold` (CEO threshold column).
 Retention, storefront, studio and the install hub are now functional app
 layers over the existing schema.
 
-| ID   | Item                               | State   | What landed                                                                                                                                                                                                                                                                            |
-| ---- | ---------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ID   | Item                               | State   | What landed                                                                                                                                                                                                                                                                              |
+| ---- | ---------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | W-7  | **Retention module** (6.23)        | ✅ done | Loyalty engine (earn on `order.paid`, redeem, manual adjust, tier recompute), Streak Stars (rule-driven award + caps), referral codes + redemption with referrer reward, Hair Quiz (public fetch/submit + recommender + lead capture + star award). `order.paid` subscriber wires earns. |
 | W-8  | **Storefront module** (6.4)        | ✅ done | Public catalogue read API (products/detail/categories/collections/content), no-login Public Order Form (contact upsert → `public_form` sales order → pay-link token), analytics ingestion (sessions/page-views/funnel-events). _Self-hosted UGC video pipeline still pending (W-13)._    |
 | W-9  | **Storefront Studio** (6.28)       | ✅ done | Theme / navigation / pages draft→publish editor (`/api/v1/storefront-studio`), honouring the one-draft / one-published constraints; publish snapshots to `storefront_revisions` via trigger.                                                                                             |
 | W-10 | **Install Hub composition** (6.10) | ✅ done | `GET /api/public/install-hub/:token` composes the order's items + matching wig-care guides + certified stylists near the delivery city + a pre-filled WhatsApp help link.                                                                                                                |
 
-### P3 — Admin / structural
+### P3 — Admin / structural — ✅ SHIPPED 2026-06-08
 
-| ID   | Item                                 | State       | Work                                                                                                                                                                                               |
-| ---- | ------------------------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| W-11 | **"Add a new business" flow** (6.21) | CLI only    | In-app provisioning endpoint that runs the `bootstrap-business.js` pipeline (create schema → apply templates → seed) + a brand registry. Today a new brand requires a developer to run the script. |
-| W-12 | **Email-signature builder** (6.13)   | not evident | Branded per-staff email signature template (one template, auto-personalised).                                                                                                                      |
-| W-13 | **Catalogue UGC video wiring** (6.4) | embed model | Swap product video editor onto the self-hosted UGC tables. Depends on W-8.                                                                                                                         |
+Preceded by a brand-registry refactor: the hardcoded `new Set(["pixiegirl",
+"faitlynhair"])` copied into ~47 files is replaced by `src/config/brands.js`
+(single live Set loaded from `business_config`, regex-guarded), so a new
+brand goes live without code edits. New migrations: `000112` (email-signature
+template column).
+
+| ID   | Item                                 | State   | What landed                                                                                                                                                                                                                                                |
+| ---- | ------------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W-11 | **"Add a new business" flow** (6.21) | ✅ done | `GET/POST /api/v1/business-setup/businesses` — `business-provision.service` validates the key, creates the schema, seeds `business_config`, applies every template, verifies table count, and `registerBrand()`s it live. Rolls back a half-built brand on failure. |
+| W-12 | **Email-signature builder** (6.13)   | ✅ done | One brand template (`business_config.email_signature_template`, migration 000112) + per-staff render into `shared.email_signatures`. Endpoints under business-setup: GET/PUT template, list/get/PUT-generate per user (token merge, HTML-escaped).            |
+| W-13 | **Catalogue UGC video wiring** (6.4) | ✅ done | `GET /catalogue/products/:id/video-library` (ready `media_assets` videos) + `POST /products/:id/videos/from-media` attaches a self-hosted asset as a `direct_upload` product video (external_ref = asset_id, embed_url = storage_path). No schema change.    |
 
 ---
 
@@ -78,10 +84,14 @@ layers over the existing schema.
 
 1. ~~**P1 finance (W-1…W-6)**~~ — ✅ SHIPPED 2026-06-08 (see table above).
 2. ~~**P2 customer-facing (W-7…W-10)**~~ — ✅ SHIPPED 2026-06-08 (see table above).
-3. **P3 admin (W-11…W-13)** — W-11 ("add a business") is the one the CEO
-   will ask for; size it as a small provisioning service over the existing
-   bootstrap script. W-13 (catalogue UGC video) finishes the storefront
-   media story begun in W-8.
+3. ~~**P3 admin (W-11…W-13)**~~ — ✅ SHIPPED 2026-06-08 (see table above),
+   preceded by the brand-registry refactor (`src/config/brands.js`).
+
+**The W-1…W-13 wiring-lag queue is now fully cleared.** Remaining follow-ups
+are operational, not feature gaps: wire `refreshBrands()` into server +
+worker boot and call it after provisioning; the layaway/UGC background
+workers (FFmpeg media processing) still need their job processors; and the
+doc-hygiene counts below.
 
 See `migrations/CHANGELOG.md` for what shipped and `VERIFICATION_REPORT.md`
 for the per-module evidence behind this list.

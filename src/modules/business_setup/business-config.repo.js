@@ -39,7 +39,8 @@ async function findByKey(businessKey) {
             payment_methods,
             payment_gateway_fees,
             installment_settings,
-            cash_request_ceo_threshold_ngn
+            cash_request_ceo_threshold_ngn,
+            email_signature_template
        FROM shared.business_config
       WHERE business_key = $1
       LIMIT 1`,

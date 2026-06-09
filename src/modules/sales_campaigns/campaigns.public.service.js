@@ -21,7 +21,7 @@ const { BRANDS } = require("../../config/brands");
 const PUBLIC_STATUSES = new Set(["scheduled", "live", "paused", "ended"]);
 
 async function resolveCampaign(slug, brandHint) {
-  if (brandHint && BRANDS.includes(brandHint)) {
+  if (brandHint && BRANDS.has(brandHint)) {
     const c = await repo.findBySlug({ brand: brandHint, slug });
     return c ? { campaign: c, brand: brandHint } : null;
   }

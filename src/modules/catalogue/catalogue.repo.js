@@ -502,6 +502,30 @@ async function removeVideo({ client, brand, product_id, video_id }) {
   return rowCount > 0;
 }
 
+// ── Self-hosted UGC video library (W-13; media_assets, 000037) ──
+async function listReadyVideoAssets({ client, brand, limit = 50 }) {
+  const { rows } = await ex(client)(
+    `SELECT asset_id, storage_path, mime_type, duration_sec, poster_path,
+            thumbnail_path, caption, source_kind, source_creator_handle
+       FROM ${t(brand, "media_assets")}
+      WHERE asset_kind = 'video'
+        AND processing_status = 'ready'
+        AND is_archived = false
+      ORDER BY uploaded_at DESC
+      LIMIT $1`,
+    [limit],
+  );
+  return rows;
+}
+
+async function getMediaAsset({ client, brand, asset_id }) {
+  const { rows } = await ex(client)(
+    `SELECT * FROM ${t(brand, "media_assets")} WHERE asset_id = $1`,
+    [asset_id],
+  );
+  return rows[0] || null;
+}
+
 // ── SEO (1:1 with product) ───────────────────────────────
 async function getSeo({ client, brand, product_id }) {
   const { rows } = await ex(client)(
@@ -624,6 +648,8 @@ module.exports = {
   listVideos,
   addVideo,
   removeVideo,
+  listReadyVideoAssets,
+  getMediaAsset,
   getSeo,
   upsertSeo,
   listAttributeValues,

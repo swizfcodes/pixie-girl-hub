@@ -170,6 +170,17 @@ const videoCreate = z
   })
   .strict();
 
+// Attach a self-hosted media asset as a product video (W-13).
+const videoFromMedia = z
+  .object({
+    media_asset_id: z.string().uuid(),
+    title: z.string().max(200).optional(),
+    caption: z.string().max(500).optional(),
+    display_order: z.coerce.number().int().min(0).optional(),
+    is_primary: z.boolean().optional(),
+  })
+  .strict();
+
 const seoUpsert = z
   .object({
     meta_title_override: z.string().max(200).nullable().optional(),
@@ -227,6 +238,7 @@ module.exports = {
   validateImageMeta: mw(imageMeta),
   validateImageUpdate: mw(imageUpdate),
   validateVideoCreate: mw(videoCreate),
+  validateVideoFromMedia: mw(videoFromMedia),
   validateSeoUpsert: mw(seoUpsert),
   validateAttributeValue: mw(attributeValue),
   validateRelatedCreate: mw(relatedCreate),
