@@ -1,11 +1,13 @@
 /**
- * Inbound webhook receivers.
+ * Inbound webhook receivers (H-4 / R-3 / D-1).
  *
- * Each gateway / channel has its own verifier. Receivers:
- *   - Verify signature against the registered secret
- *   - Persist raw payload to shared.webhook_log (append-only)
- *   - Enqueue a processing job (so the response is fast)
- *   - Return 200/204 quickly (gateway requirement)
+ * Each receiver:
+ *   - Uses the raw body captured by the global JSON parser (req.rawBody) —
+ *     required for HMAC verification over the exact bytes.
+ *   - Delegates to webhooks.service.receive(): verify signature → persist to
+ *     shared.webhook_log (deduped) → enqueue `webhook.received` on the outbox →
+ *     respond fast (200 on accept, 401 on bad signature).
+ * Actual processing happens post-commit in the outbox dispatcher (worker).
  *
  * Mounted at: /api/webhooks/*
  */
@@ -14,45 +16,46 @@
 
 const express = require("express");
 const router = express.Router();
+const service = require("./webhooks.service");
 
-// Note: raw body needed for HMAC verification — apply express.raw() per route
-router.post(
-  "/paystack",
-  express.raw({ type: "application/json" }),
-  (_req, res) => res.status(200).send(),
-);
-router.post("/opay", express.raw({ type: "application/json" }), (_req, res) =>
-  res.status(200).send(),
-);
-router.post("/stripe", express.raw({ type: "application/json" }), (_req, res) =>
-  res.status(200).send(),
-);
-router.post("/nomba", express.raw({ type: "application/json" }), (_req, res) =>
-  res.status(200).send(),
-);
+function receiver(source) {
+  return async (req, res, next) => {
+    try {
+      const r = await service.receive(source, {
+        rawBody: req.rawBody || Buffer.from(JSON.stringify(req.body || {})),
+        headers: req.headers,
+        ip: req.ip,
+      });
+      res.status(r.status).json(r.body);
+    } catch (err) {
+      next(err);
+    }
+  };
+}
 
-// Meta verification (GET) + payload (POST)
-router.get("/meta/whatsapp", (_req, res) => res.status(200).send());
-router.post(
-  "/meta/whatsapp",
-  express.raw({ type: "application/json" }),
-  (_req, res) => res.status(200).send(),
-);
-router.get("/meta/instagram", (_req, res) => res.status(200).send());
-router.post(
-  "/meta/instagram",
-  express.raw({ type: "application/json" }),
-  (_req, res) => res.status(200).send(),
-);
+// ── Payment gateways ──────────────────────────────────────
+router.post("/paystack", receiver("paystack"));
+router.post("/opay", receiver("opay"));
+router.post("/stripe", receiver("stripe"));
+router.post("/nomba", receiver("nomba"));
 
-// Logistics
-router.post(
-  "/chowdeck",
-  express.raw({ type: "application/json" }),
-  (_req, res) => res.status(200).send(),
-);
-router.post("/gigl", express.raw({ type: "application/json" }), (_req, res) =>
-  res.status(200).send(),
-);
+// ── Meta (WhatsApp / Instagram): GET verify handshake + POST payload ──
+router.get("/meta/whatsapp", (req, res) => {
+  const c = service.metaChallenge("meta_whatsapp", req.query);
+  if (c.ok) return res.status(200).send(String(c.challenge));
+  return res.sendStatus(403);
+});
+router.post("/meta/whatsapp", receiver("meta_whatsapp"));
+
+router.get("/meta/instagram", (req, res) => {
+  const c = service.metaChallenge("meta_instagram", req.query);
+  if (c.ok) return res.status(200).send(String(c.challenge));
+  return res.sendStatus(403);
+});
+router.post("/meta/instagram", receiver("meta_instagram"));
+
+// ── Logistics ─────────────────────────────────────────────
+router.post("/chowdeck", receiver("chowdeck"));
+router.post("/gigl", receiver("gigl"));
 
 module.exports = router;

@@ -283,6 +283,29 @@ async function markReminderSent({ brand, id }) {
     [id],
   );
 }
+/**
+ * Atomically CLAIM a layaway reminder send (H-6). Stamps last_reminder_sent_at
+ * only if the order is still due (re-checking the cadence inside the UPDATE),
+ * and RETURNs the row only to the winner. Concurrent sweep runs therefore send
+ * at most one reminder per cadence window — closing the SELECT-then-UPDATE race.
+ */
+async function claimReminderSend({ brand, id, cadenceDays }) {
+  const { rows } = await query(
+    `UPDATE ${t(brand, "sales_orders")}
+        SET last_reminder_sent_at = now()
+      WHERE order_id = $1
+        AND payment_model = 'layaway'
+        AND status = 'pending_payment'
+        AND amount_paid_ngn < total_ngn
+        AND (
+          last_reminder_sent_at IS NULL
+          OR last_reminder_sent_at < now() - ($2 || ' days')::interval
+        )
+      RETURNING order_id`,
+    [id, String(cadenceDays)],
+  );
+  return rows.length > 0;
+}
 const HEADER_COLS = [
   "order_type",
   "shipping_fee_ngn",
@@ -334,6 +357,20 @@ async function listPayments({ client, brand, order_id }) {
     [order_id],
   );
   return rows;
+}
+/**
+ * Idempotency check (H-4): has a gateway payment with this provider_reference
+ * already been recorded on this order? Used by the webhook confirm handler so a
+ * re-delivered charge.success never double-records the payment.
+ */
+async function paymentExistsByProviderRef({ client, brand, order_id, provider_reference }) {
+  if (!provider_reference) return false;
+  const { rows } = await ex(client)(
+    `SELECT 1 FROM ${t(brand, "sales_order_payments")}
+      WHERE order_id = $1 AND provider_reference = $2 LIMIT 1`,
+    [order_id, provider_reference],
+  );
+  return rows.length > 0;
 }
 
 // ── Quotations (+ lines) ─────────────────────────────────
@@ -556,6 +593,8 @@ module.exports = {
   markReminderSent,
   addPayment,
   listPayments,
+  paymentExistsByProviderRef,
+  claimReminderSend,
   createQuotation,
   insertQuotationLine,
   findQuotationById,

@@ -37,6 +37,14 @@ async function runLayawayReminders() {
 
     for (const order of due) {
       try {
+        // Claim atomically first (H-6): only the runner that stamps the row
+        // emits, so overlapping sweeps can't double-send the same reminder.
+        const claimed = await salesRepo.claimReminderSend({
+          brand,
+          id: order.order_id,
+          cadenceDays,
+        });
+        if (!claimed) continue;
         salesEvents.emit("order.payment_reminder", {
           brand,
           order_id: order.order_id,
@@ -47,7 +55,6 @@ async function runLayawayReminders() {
           balance_due_ngn: order.balance_due_ngn,
           public_tracking_token: order.public_tracking_token,
         });
-        await salesRepo.markReminderSent({ brand, id: order.order_id });
         sent += 1;
       } catch (err) {
         logger.error(

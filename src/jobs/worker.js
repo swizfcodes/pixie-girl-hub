@@ -176,6 +176,7 @@ async function startWorkers() {
   require("../modules/logistics/logistics.subscribers"); // dispatch delivery
   require("../modules/retention/retention.subscribers"); // loyalty + streak
   require("../shared/notifications/notifications.subscribers"); // rep notification
+  require("../modules/business_setup/webhooks.service"); // webhook.received → dispatch
   outboxTimer = setInterval(() => {
     outbox
       .dispatchDue()
