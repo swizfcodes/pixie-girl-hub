@@ -37,14 +37,19 @@ async function runSoftFkReconciliation() {
 
     for (const pair of pairs) {
       assertIdents(
-        pair.source_schema, pair.source_table, pair.source_column,
-        pair.target_table, pair.target_column,
+        pair.source_schema,
+        pair.source_table,
+        pair.source_column,
+        pair.target_table,
+        pair.target_column,
       );
       if (pair.source_discriminator_column)
         assertIdents(pair.source_discriminator_column);
 
       const brandTargets =
-        pair.target_schema_pattern === "{business}" ? [...BRANDS] : [pair.target_schema_pattern];
+        pair.target_schema_pattern === "{business}"
+          ? [...BRANDS]
+          : [pair.target_schema_pattern];
 
       for (const targetSchema of brandTargets) {
         assertIdents(targetSchema);
@@ -53,8 +58,13 @@ async function runSoftFkReconciliation() {
         const filterClauses = [`s.${pair.source_column} IS NOT NULL`];
         let pi = 1;
 
-        if (pair.source_discriminator_column && pair.source_discriminator_value) {
-          filterClauses.push(`s.${pair.source_discriminator_column} = $${pi++}`);
+        if (
+          pair.source_discriminator_column &&
+          pair.source_discriminator_value
+        ) {
+          filterClauses.push(
+            `s.${pair.source_discriminator_column} = $${pi++}`,
+          );
           filterParams.push(pair.source_discriminator_value);
         }
 
@@ -99,7 +109,10 @@ async function runSoftFkReconciliation() {
             );
             totalOrphans += 1;
           } catch (err) {
-            logger.warn({ err, registry_id: pair.registry_id }, "finding insert failed");
+            logger.warn(
+              { err, registry_id: pair.registry_id },
+              "finding insert failed",
+            );
           }
         }
       }
@@ -109,12 +122,16 @@ async function runSoftFkReconciliation() {
       `SELECT shared.fn_soft_fk_reconciliation_finish($1, $2, NULL)`,
       [run_id, totalOrphans],
     );
-    logger.info({ run_id, totalOrphans, pairs: pairs.length }, "soft-FK recon complete");
+    logger.info(
+      { run_id, totalOrphans, pairs: pairs.length },
+      "soft-FK recon complete",
+    );
   } catch (err) {
-    await query(
-      `SELECT shared.fn_soft_fk_reconciliation_finish($1, $2, $3)`,
-      [run_id, totalOrphans, String(err.message)],
-    ).catch(() => {});
+    await query(`SELECT shared.fn_soft_fk_reconciliation_finish($1, $2, $3)`, [
+      run_id,
+      totalOrphans,
+      String(err.message),
+    ]).catch(() => {});
     logger.error({ err, run_id }, "soft-FK reconciliation failed");
   }
 

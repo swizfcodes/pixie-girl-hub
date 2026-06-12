@@ -56,6 +56,19 @@ const receive = z
   })
   .strict();
 
+const reworkAdd = z
+  .object({
+    reason: z.string().min(1).max(500),
+    qc_finding: z.string().max(500).optional(),
+    extra_cost_ngn: z.coerce.number().nonnegative().optional(),
+    delay_days: z.coerce.number().int().nonnegative().optional(),
+    outcome: z.enum(["passed", "still_failing", "scrapped"]).optional(),
+    rework_completed_at: z.string().datetime().optional(),
+    incurred_at: z.string().date().optional(),
+    notes: z.string().max(1000).optional(),
+  })
+  .strict();
+
 const mk = (schema) => (req, _res, next) => {
   req.body = schema.parse(req.body || {});
   next();
@@ -67,4 +80,5 @@ module.exports = {
   validateCostAdd: mk(costAdd),
   validateUnitAdd: mk(unitAdd),
   validateReceive: mk(receive),
+  validateReworkAdd: mk(reworkAdd),
 };

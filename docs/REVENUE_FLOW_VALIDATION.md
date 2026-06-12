@@ -1,8 +1,8 @@
 # Revenue → Sales → Accounting — End-to-End Validation
 
-**Principle being validated (user directive).** *Every revenue- or discount-bearing event,
+**Principle being validated (user directive).** _Every revenue- or discount-bearing event,
 no matter where it originates, must resolve in the **Sales** module (a `sales_orders` row),
-and the **General Ledger must balance**. Nothing flows in a silo.*
+and the **General Ledger must balance**. Nothing flows in a silo._
 
 **Method.** Host-authoritative static trace (Read/Grep) of every revenue entry point through
 to `sales_orders` and the GL journal. No `node`/bash execution — the linter validates syntax;
@@ -14,15 +14,15 @@ the bash mount serves truncated copies of fresh files so it is not used for vali
 
 ## 1. Revenue entry points → do they resolve in Sales?
 
-| Entry point | Path to `sales_orders` | Resolves in Sales? | GL |
-|---|---|---|---|
-| **Direct sale** (`POST /sales/orders` + `/payments`) | `sales.createOrder` → `addPayment` → `markPaid` | ✅ native | `order.paid` → GL |
-| **POS** | `pos.service` → `salesService.createOrder` (L419) + `addPayment` (L481); "last split trips markPaid" | ✅ via Sales | `order.paid` → GL |
-| **Storefront order-form** (public, no login) | `storefront.submitOrderForm` → `public_form` sales order; payment confirmed later by webhook | ✅ via Sales | `order.paid` → GL |
-| **Paystack webhook** (`charge.success`) | `webhooks.service.confirmPaystackCharge` → `salesService.addPayment(metadata.order_id)` (H-4) | ✅ via Sales | `order.paid` → GL |
-| **Campaign discount** | applied inside `createOrder` (discount engine) → `sales_order_discounts` (`source='campaign'`) | ✅ in the order | reduces revenue in GL |
-| **Coupon** (`input.coupon_code`) | **NEW 2026-06-11** — applied inside `createOrder`: pre-VAT line distribution (or zero shipping), `sales_order_discounts` (`source='coupon'`) + `coupon_redemptions` linked to the order + usage bump under the coupon row lock | ✅ in the order | reduces revenue + VAT in GL |
-| **Intercompany / retail-partners / service-jobs** | post sales + mirrored/partner GL (existing, prior audits) | ✅ | balanced |
+| Entry point                                          | Path to `sales_orders`                                                                                                                                                                                                         | Resolves in Sales? | GL                          |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------ | --------------------------- |
+| **Direct sale** (`POST /sales/orders` + `/payments`) | `sales.createOrder` → `addPayment` → `markPaid`                                                                                                                                                                                | ✅ native          | `order.paid` → GL           |
+| **POS**                                              | `pos.service` → `salesService.createOrder` (L419) + `addPayment` (L481); "last split trips markPaid"                                                                                                                           | ✅ via Sales       | `order.paid` → GL           |
+| **Storefront order-form** (public, no login)         | `storefront.submitOrderForm` → `public_form` sales order; payment confirmed later by webhook                                                                                                                                   | ✅ via Sales       | `order.paid` → GL           |
+| **Paystack webhook** (`charge.success`)              | `webhooks.service.confirmPaystackCharge` → `salesService.addPayment(metadata.order_id)` (H-4)                                                                                                                                  | ✅ via Sales       | `order.paid` → GL           |
+| **Campaign discount**                                | applied inside `createOrder` (discount engine) → `sales_order_discounts` (`source='campaign'`)                                                                                                                                 | ✅ in the order    | reduces revenue in GL       |
+| **Coupon** (`input.coupon_code`)                     | **NEW 2026-06-11** — applied inside `createOrder`: pre-VAT line distribution (or zero shipping), `sales_order_discounts` (`source='coupon'`) + `coupon_redemptions` linked to the order + usage bump under the coupon row lock | ✅ in the order    | reduces revenue + VAT in GL |
+| **Intercompany / retail-partners / service-jobs**    | post sales + mirrored/partner GL (existing, prior audits)                                                                                                                                                                      | ✅                 | balanced                    |
 
 **Result:** every active revenue path resolves in `sales_orders` and posts through the single
 `order.paid` → outbox → `accounting` GL path. ✅
@@ -48,7 +48,7 @@ The per-brand `fn_journal_entry_balance_check` trigger re-asserts this on every 
 unbalanced entry is rejected at the DB.
 
 **Coupon correctness:** because the coupon discount is distributed across taxable lines
-*pre-VAT*, `net`, `tax`, and `total` on the order are all reduced consistently — so the GL posts
+_pre-VAT_, `net`, `tax`, and `total` on the order are all reduced consistently — so the GL posts
 the true (post-coupon) revenue and VAT, and still balances. A free-shipping coupon reduces
 `shipping_fee_ngn` (and thus 4200 Shipping Revenue) directly. ✅
 
@@ -58,13 +58,13 @@ the true (post-coupon) revenue and VAT, and still balances. A free-shipping coup
 
 These are the end-to-end connections still to make for the principle to hold completely:
 
-| # | Source | Today | Required wire |
-|---|---|---|---|
-| W-A | **Coupons** | ✅ **CLOSED 2026-06-11** — applied in `createOrder` across direct/POS/storefront | — |
-| W-D | **Loyalty-points redemption** | ✅ **CLOSED 2026-06-11** — `redeem_points` accepted on all three channels; `createOrder` converts points→NGN (`loyalty_settings.naira_per_point`, default ₦10, PD §6.23.3), applies it floor-respecting alongside the coupon (shared headroom), records a `sales_order_discounts` row (`source='loyalty_points'`) and the negative `loyalty_ledger` entry referencing the order — atomic | — |
-| W-E | **Referral** | ✅ N/A — referral rewards the *referrer* with loyalty points (and may issue the referee a coupon, which flows through the coupon path); it is not an order-level discount, so no `createOrder` wiring is required | — |
-| W-B | **Bundle offers** (F-2) | `priceBundle` computes a discount, but nothing applies it at order placement | Carry a `bundle_id` on the order input; in `createOrder`, validate the bundle's components are present, apply its discount like the coupon path (pre-VAT distribution, shared floor headroom), record a `sales_order_discounts` row, bump bundle usage |
-| W-C | **Wig subscription billing** (F-1) | Plan/lifecycle built; **no cron creates the per-cycle order**, so subscription revenue never reaches Sales | Billing cron: claim due subscriptions (`FOR UPDATE SKIP LOCKED`), charge via Paystack `charge_authorization`, on success **create a `sales_orders` row** (channel `subscription`) → `markPaid` → GL, stamp `subscription_billing_attempts.created_order_id`. Money-moving → validate on staging first |
+| #   | Source                             | Today                                                                                                                                                                                                                                                                                                                                                                                    | Required wire                                                                                                                                                                                                                                                                                         |
+| --- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W-A | **Coupons**                        | ✅ **CLOSED 2026-06-11** — applied in `createOrder` across direct/POS/storefront                                                                                                                                                                                                                                                                                                         | —                                                                                                                                                                                                                                                                                                     |
+| W-D | **Loyalty-points redemption**      | ✅ **CLOSED 2026-06-11** — `redeem_points` accepted on all three channels; `createOrder` converts points→NGN (`loyalty_settings.naira_per_point`, default ₦10, PD §6.23.3), applies it floor-respecting alongside the coupon (shared headroom), records a `sales_order_discounts` row (`source='loyalty_points'`) and the negative `loyalty_ledger` entry referencing the order — atomic | —                                                                                                                                                                                                                                                                                                     |
+| W-E | **Referral**                       | ✅ N/A — referral rewards the _referrer_ with loyalty points (and may issue the referee a coupon, which flows through the coupon path); it is not an order-level discount, so no `createOrder` wiring is required                                                                                                                                                                        | —                                                                                                                                                                                                                                                                                                     |
+| W-B | **Bundle offers** (F-2)            | `priceBundle` computes a discount, but nothing applies it at order placement                                                                                                                                                                                                                                                                                                             | Carry a `bundle_id` on the order input; in `createOrder`, validate the bundle's components are present, apply its discount like the coupon path (pre-VAT distribution, shared floor headroom), record a `sales_order_discounts` row, bump bundle usage                                                |
+| W-C | **Wig subscription billing** (F-1) | Plan/lifecycle built; **no cron creates the per-cycle order**, so subscription revenue never reaches Sales                                                                                                                                                                                                                                                                               | Billing cron: claim due subscriptions (`FOR UPDATE SKIP LOCKED`), charge via Paystack `charge_authorization`, on success **create a `sales_orders` row** (channel `subscription`) → `markPaid` → GL, stamp `subscription_billing_attempts.created_order_id`. Money-moving → validate on staging first |
 
 > **Validator gap caught during this pass:** the authenticated `orderCreate` schema (`.strict()`)
 > did not list `coupon_code`, so a direct `/sales/orders` request carrying a coupon would have been
@@ -122,9 +122,9 @@ should be validated on staging before enablement.
    the order-form validator now accepts those fields and `submitOrderForm` forwards them, so
    storefront orders price identically to direct/POS and resolve fully in Sales.
 
-2. **Coupon × campaign stacking — now per the PD.** The PD (§6.23/§6.25) states: *"loyalty can
+2. **Coupon × campaign stacking — now per the PD.** The PD (§6.23/§6.25) states: _"loyalty can
    never push a price below floor — and the CEO sets whether discounts may stack on already-
-   discounted sale items."* Implemented exactly:
+   discounted sale items."_ Implemented exactly:
    - **Floor is always enforced.** The coupon consumes only each line's headroom above the
      variant `min_price` (distributed proportionally), so a stacked discount can never sell below
      floor. (Campaign discounts were already floor-clamped.)

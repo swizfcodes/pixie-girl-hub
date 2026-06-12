@@ -185,7 +185,9 @@ async function createOrderTx({ brand, user, request_id, input }) {
           ? amt.minus(allocated)
           : avail.gt(money(0))
             ? money(
-                toCurrencyString(amt.times(headroomByIdx[idx]).dividedBy(avail)),
+                toCurrencyString(
+                  amt.times(headroomByIdx[idx]).dividedBy(avail),
+                ),
               )
             : money(0);
         extraShareByIdx[idx] = extraShareByIdx[idx].plus(share);
@@ -282,7 +284,11 @@ async function createOrderTx({ brand, user, request_id, input }) {
     if (input.bundle_id) {
       const bundle = await bundleRepo.getById({ brand, id: input.bundle_id });
       if (!bundle || !bundle.is_active)
-        throw new AppError("BUNDLE_INVALID", "Bundle not found or inactive", 409);
+        throw new AppError(
+          "BUNDLE_INVALID",
+          "Bundle not found or inactive",
+          409,
+        );
       const components = bundle.components || [];
       const isComponent = (b) =>
         components.some((c) =>

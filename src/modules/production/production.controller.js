@@ -71,6 +71,38 @@ async function receiveProduction(req, res) {
     }),
   });
 }
+async function getLandedCost(req, res) {
+  res.json({
+    data: await service.getLandedCost({ brand: req.brand, id: req.params.id }),
+  });
+}
+async function refreshLandedCost(req, res) {
+  res.json({
+    data: await service.refreshLandedCost({
+      brand: req.brand,
+      id: req.params.id,
+    }),
+  });
+}
+async function recordRework(req, res) {
+  res.status(201).json({
+    data: await service.recordRework({
+      ...base(req),
+      runId: req.params.id,
+      unitId: req.params.unitId,
+      input: req.body,
+    }),
+  });
+}
+async function listRework(req, res) {
+  res.json({
+    data: await service.listRework({
+      brand: req.brand,
+      runId: req.params.id,
+      unitId: req.query.unit_id,
+    }),
+  });
+}
 
 module.exports = {
   listRuns,
@@ -80,4 +112,8 @@ module.exports = {
   addCostComponent,
   addUnit,
   receiveProduction,
+  getLandedCost,
+  refreshLandedCost,
+  recordRework,
+  listRework,
 };

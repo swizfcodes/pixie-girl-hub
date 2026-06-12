@@ -235,7 +235,10 @@ async function runDueBilling({ limit = 50 } = {}) {
         repo.claimDueForBilling({ client, brand, limit }),
       );
     } catch (err) {
-      logger.error({ err: err.message, brand }, "subscription billing claim failed");
+      logger.error(
+        { err: err.message, brand },
+        "subscription billing claim failed",
+      );
       continue;
     }
     for (const sub of due) {
@@ -257,7 +260,10 @@ async function runDueBilling({ limit = 50 } = {}) {
               failure_message: "no saved authorization",
             },
           });
-          await repo.recordBillingFailure({ id: sub.subscription_id, set_past_due: setPastDue });
+          await repo.recordBillingFailure({
+            id: sub.subscription_id,
+            set_past_due: setPastDue,
+          });
           continue;
         }
 
@@ -308,7 +314,10 @@ async function runDueBilling({ limit = 50 } = {}) {
               failure_message: (res && res.message) || "charge failed",
             },
           });
-          await repo.recordBillingFailure({ id: sub.subscription_id, set_past_due: setPastDue });
+          await repo.recordBillingFailure({
+            id: sub.subscription_id,
+            set_past_due: setPastDue,
+          });
         }
       } catch (err) {
         logger.error(
@@ -316,7 +325,10 @@ async function runDueBilling({ limit = 50 } = {}) {
           "subscription billing failed",
         );
         await repo
-          .recordBillingFailure({ id: sub.subscription_id, set_past_due: setPastDue })
+          .recordBillingFailure({
+            id: sub.subscription_id,
+            set_past_due: setPastDue,
+          })
           .catch(() => {});
       }
     }

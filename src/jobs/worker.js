@@ -138,7 +138,12 @@ async function startWorkers() {
     runSubscriptionBilling,
   } = require("./schedulers/subscription-billing");
   const { runInvoiceReminderSweep } = require("./schedulers/invoice-reminders");
-  const { runSoftFkReconciliation } = require("./schedulers/soft-fk-reconciliation");
+  const {
+    runSoftFkReconciliation,
+  } = require("./schedulers/soft-fk-reconciliation");
+  const {
+    runChemicalReconciliation,
+  } = require("./schedulers/chemical-reconciliation");
 
   // Re-sync the brand registry so a business provisioned by the API process
   // reaches this worker's crons without a restart.
@@ -173,6 +178,11 @@ async function startWorkers() {
   );
   scheduleCron("invoice-reminders", "*/30 * * * *", runInvoiceReminderSweep);
   scheduleCron("soft-fk-reconciliation", "0 3 * * *", runSoftFkReconciliation);
+  scheduleCron(
+    "chemical-reconciliation",
+    "30 3 2 * *",
+    runChemicalReconciliation,
+  );
 
   // ── Transactional outbox dispatcher (H-2) ──────────────
   // Register the durable event handlers IN THIS PROCESS (the dispatcher runs

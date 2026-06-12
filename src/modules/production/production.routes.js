@@ -49,4 +49,21 @@ router.post(
   controller.receiveProduction,
 );
 
+// ── Landed-cost breakdown (F-7a) ──────────────────────────
+router.get("/runs/:id/landed-cost", can("view"), controller.getLandedCost);
+router.post(
+  "/runs/:id/landed-cost/recompute",
+  can("edit"),
+  controller.refreshLandedCost,
+);
+
+// ── Rework events (F-7b) ──────────────────────────────────
+router.get("/runs/:id/rework", can("view"), controller.listRework);
+router.post(
+  "/runs/:id/units/:unitId/rework",
+  can("edit"),
+  validator.validateReworkAdd,
+  controller.recordRework,
+);
+
 module.exports = router;

@@ -194,6 +194,55 @@ const deductionCreateSchema = z.object({
 });
 const deductionUpdateSchema = deductionCreateSchema.partial();
 
+// ── Performance appraisal scoring + reviews (F-8) ──────────
+const SCORE_SOURCES = [
+  "manual",
+  "customer_ratings",
+  "sales_data",
+  "crm_data",
+  "service_job_ratings",
+  "clock_in_data",
+  "custom",
+];
+const appraisalScoreSchema = z.object({
+  user_id: uuid,
+  scores: z
+    .array(
+      z.object({
+        kpi_id: uuid,
+        raw_score: z.coerce.number(),
+        comments: z.string().max(2000).optional(),
+        score_source: z.enum(SCORE_SOURCES).optional(),
+        evidence: z.record(z.any()).optional(),
+      }),
+    )
+    .min(1),
+});
+const reviewGenerateSchema = z.object({ user_id: uuid });
+const reviewContentSchema = z
+  .object({
+    strengths: z.string().max(5000).optional(),
+    improvement_areas: z.string().max(5000).optional(),
+    development_goals: z.string().max(5000).optional(),
+    manager_comments: z.string().max(5000).optional(),
+  })
+  .refine((o) => Object.keys(o).length > 0, "No fields to update");
+const reviewAdvanceSchema = z.object({
+  status: z.enum([
+    "draft",
+    "submitted",
+    "reviewed",
+    "approved",
+    "finalised",
+    "disputed",
+  ]),
+});
+const reviewAcknowledgeSchema = z.object({
+  agreed: z.boolean().optional(),
+  employee_response: z.string().max(5000).optional(),
+  employee_disagreement: z.string().max(5000).optional(),
+});
+
 function make(schema) {
   return (req, _res, next) => {
     req.body = schema.parse(req.body || {});
@@ -219,6 +268,13 @@ module.exports = {
   deduction: {
     create: make(deductionCreateSchema),
     update: make(deductionUpdateSchema),
+  },
+  appraisal: {
+    score: make(appraisalScoreSchema),
+    reviewGenerate: make(reviewGenerateSchema),
+    reviewContent: make(reviewContentSchema),
+    reviewAdvance: make(reviewAdvanceSchema),
+    reviewAcknowledge: make(reviewAcknowledgeSchema),
   },
   schemas: {
     staffCreateSchema,

@@ -32,6 +32,25 @@ router.patch(
   c.updateServiceType,
 );
 
+// ── Chemical recipes (F-7c) — literal segment before /:id ──
+router.get("/recipes", can("view"), c.listRecipes);
+router.post("/recipes", can("create"), v.validateRecipeCreate, c.createRecipe);
+router.get("/recipes/:id", can("view"), c.getRecipe);
+router.patch(
+  "/recipes/:id",
+  can("edit"),
+  v.validateRecipeUpdate,
+  c.updateRecipe,
+);
+
+// ── Monthly chemical reconciliation (F-7e) ─────────────────
+router.get("/chemical-reconciliations", can("view"), c.listReconciliations);
+router.post(
+  "/periods/:periodId/chemical-reconciliation",
+  can("approve"),
+  c.reconcileChemicals,
+);
+
 // ── Jobs ───────────────────────────────────────────────────
 router.get("/", can("view"), c.listJobs);
 router.post("/", can("create"), v.validateJobCreate, c.createJob);
@@ -40,5 +59,14 @@ router.patch("/:id", can("edit"), v.validateJobUpdate, c.updateJob);
 router.post("/:id/advance", can("edit"), v.validateJobAdvance, c.advanceJob);
 router.post("/:id/assign", can("edit"), v.validateAssignStaff, c.assignStaff);
 router.post("/:id/outcome", can("edit"), v.validateOutcome, c.recordOutcome);
+
+// ── Service-job chemical consumption (F-7d) ────────────────
+router.get("/:id/chemicals", can("view"), c.listChemicals);
+router.post(
+  "/:id/chemicals",
+  can("edit"),
+  v.validateChemicalRecord,
+  c.recordChemical,
+);
 
 module.exports = router;

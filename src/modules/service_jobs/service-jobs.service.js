@@ -15,7 +15,9 @@ const repo = require("./service-jobs.repo");
 const events = require("./service-jobs.events");
 const { audit } = require("../../middleware/audit");
 const { transaction } = require("../../config/database");
+const { money } = require("../../utils/money");
 const { NotFoundError, AppError } = require("../../utils/errors");
+const { BRANDS } = require("../../config/brands");
 
 const A = (
   brand,
@@ -288,6 +290,208 @@ async function createForOrder({ brand, order }) {
   });
 }
 
+// ── Chemical recipes (F-7c) ────────────────────────────────
+function listRecipes({ brand, is_active }) {
+  return repo.listRecipes({ brand, is_active });
+}
+async function getRecipe({ brand, id }) {
+  const r = await repo.getRecipe({ brand, id });
+  if (!r) throw new NotFoundError("Chemical recipe");
+  return r;
+}
+async function createRecipe({ brand, user, request_id, input }) {
+  const r = await repo.createRecipe({
+    brand,
+    r: input,
+    user_id: user ? user.user_id : null,
+  });
+  await A(
+    brand,
+    user,
+    "service_jobs.recipe.create",
+    "chemical_recipe",
+    r.recipe_id,
+    { recipe_key: r.recipe_key },
+    request_id,
+  );
+  return r;
+}
+async function updateRecipe({ brand, user, request_id, id, patch }) {
+  const before = await repo.getRecipe({ brand, id });
+  if (!before) throw new NotFoundError("Chemical recipe");
+  const r = await repo.updateRecipe({ brand, id, patch });
+  await A(
+    brand,
+    user,
+    "service_jobs.recipe.update",
+    "chemical_recipe",
+    id,
+    patch,
+    request_id,
+  );
+  return r;
+}
+
+// ── Service-job chemical consumption (F-7d) ────────────────
+async function recordChemicalConsumption({
+  brand,
+  user,
+  request_id,
+  id,
+  input,
+}) {
+  const job = await repo.getServiceJob({ brand, id });
+  if (!job) throw new NotFoundError("Service job");
+  const jc = await repo.addJobChemical({
+    brand,
+    jc: { ...input, job_id: id, recorded_by: user ? user.user_id : null },
+  });
+  await A(
+    brand,
+    user,
+    "service_jobs.chemical.record",
+    "service_job_chemical",
+    jc.consumption_id,
+    { job_id: id, chemical_name: jc.chemical_name, qty_used: jc.qty_used },
+    request_id,
+  );
+  events.emit("chemical_recorded", { brand, job_id: id });
+  return jc;
+}
+function listChemicalConsumption({ brand, id }) {
+  return repo.listJobChemicals({ brand, job_id: id });
+}
+
+// ── Monthly chemical reconciliation (F-7e) ─────────────────
+const VARIANCE_TOLERANCE_PCT = 0.1; // 10% gap vs purchased flags for review
+
+/**
+ * Reconcile a fiscal period: system-derived consumption (service_job_chemicals)
+ * vs the admin-recorded purchased/disposed quantities (preserved across reruns).
+ * A negative variance (used more than bought+disposed) or a large gap is flagged
+ * as the §6.30 anti-pocketing signal. Idempotent per (period, chemical, unit).
+ */
+async function reconcileChemicals({
+  brand,
+  user,
+  request_id,
+  fiscal_period_id,
+}) {
+  const period = await repo.getFiscalPeriod({ brand, id: fiscal_period_id });
+  if (!period) throw new NotFoundError("Fiscal period");
+
+  const [consumed, existing] = await Promise.all([
+    repo.consumedByChemical({
+      brand,
+      starts_on: period.starts_on,
+      ends_on: period.ends_on,
+    }),
+    repo.existingReconciliationMap({ brand, fiscal_period_id }),
+  ]);
+  const priorByKey = new Map(
+    existing.map((e) => [
+      `${e.chemical_name}__${e.unit}`,
+      { qty_purchased: e.qty_purchased, qty_disposed: e.qty_disposed },
+    ]),
+  );
+
+  const results = await transaction(async (client) => {
+    const out = [];
+    for (const c of consumed) {
+      const prior = priorByKey.get(`${c.chemical_name}__${c.unit}`) || {
+        qty_purchased: 0,
+        qty_disposed: 0,
+      };
+      const purchased = money(prior.qty_purchased || 0);
+      const disposed = money(prior.qty_disposed || 0);
+      const consumedQty = money(c.qty_consumed || 0);
+      const variance = purchased.minus(consumedQty).minus(disposed);
+
+      let status = "normal";
+      if (variance.lt(0)) status = "flagged";
+      else if (
+        purchased.gt(0) &&
+        variance.abs().div(purchased).gt(VARIANCE_TOLERANCE_PCT)
+      )
+        status = "flagged";
+
+      const rec = await repo.upsertReconciliation({
+        client,
+        brand,
+        rec: {
+          fiscal_period_id,
+          chemical_name: c.chemical_name,
+          unit: c.unit,
+          qty_purchased: purchased.toFixed(3),
+          qty_consumed: consumedQty.toFixed(3),
+          qty_disposed: disposed.toFixed(3),
+          variance_value_ngn: null,
+          variance_status: status,
+        },
+      });
+      out.push(rec);
+    }
+    return out;
+  });
+
+  const flagged = results.filter((r) => r.variance_status === "flagged").length;
+  await A(
+    brand,
+    user,
+    "service_jobs.chemical.reconcile",
+    "fiscal_period",
+    fiscal_period_id,
+    { chemicals: results.length, flagged },
+    request_id,
+  );
+  if (flagged > 0)
+    events.emit("chemical_variance_flagged", {
+      brand,
+      fiscal_period_id,
+      flagged,
+    });
+  return {
+    period_id: fiscal_period_id,
+    reconciled: results.length,
+    flagged,
+    results,
+  };
+}
+
+function listReconciliations({ brand, fiscal_period_id, variance_status }) {
+  return repo.listReconciliations({ brand, fiscal_period_id, variance_status });
+}
+
+/**
+ * Cron entry: reconcile every brand's periods that ended in the last `days`
+ * and aren't locked. Idempotent, so re-running is safe.
+ */
+async function runMonthlyChemicalReconciliation({ days = 40 } = {}) {
+  let total = 0;
+  for (const brand of BRANDS) {
+    let periods = [];
+    try {
+      periods = await repo.periodsEndedWithin({ brand, days });
+    } catch {
+      continue;
+    }
+    for (const p of periods) {
+      try {
+        const r = await reconcileChemicals({
+          brand,
+          user: { user_id: null },
+          request_id: null,
+          fiscal_period_id: p.period_id,
+        });
+        total += r.reconciled;
+      } catch {
+        // isolate per-period failures
+      }
+    }
+  }
+  return { reconciled: total };
+}
+
 module.exports = {
   listServiceTypes,
   createServiceType,
@@ -300,4 +504,13 @@ module.exports = {
   assignStaff,
   recordOutcome,
   createForOrder,
+  listRecipes,
+  getRecipe,
+  createRecipe,
+  updateRecipe,
+  recordChemicalConsumption,
+  listChemicalConsumption,
+  reconcileChemicals,
+  listReconciliations,
+  runMonthlyChemicalReconciliation,
 };

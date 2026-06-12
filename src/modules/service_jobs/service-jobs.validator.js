@@ -95,6 +95,53 @@ const outcome = z
   })
   .strict();
 
+// ── Chemicals (F-7c/d) ─────────────────────────────────────
+const ingredient = z
+  .object({
+    chemical_name: z.string().min(1).max(160),
+    brand: z.string().max(120).optional(),
+    sku: z.string().max(80).optional(),
+    qty_ml: z.coerce.number().nonnegative().optional(),
+    qty_g: z.coerce.number().nonnegative().optional(),
+    role: z.string().max(80).optional(),
+  })
+  .passthrough();
+
+const recipeCreate = z
+  .object({
+    recipe_key: z.string().min(1).max(60),
+    display_name: z.string().min(1).max(160),
+    ingredients: z.array(ingredient).min(1),
+    instructions: z.string().max(5000).optional(),
+    target_shade: z.string().max(120).optional(),
+    notes: z.string().max(2000).optional(),
+    is_active: z.boolean().optional(),
+  })
+  .strict();
+
+const recipeUpdate = z
+  .object({
+    display_name: z.string().min(1).max(160).optional(),
+    ingredients: z.array(ingredient).min(1).optional(),
+    instructions: z.string().max(5000).optional(),
+    target_shade: z.string().max(120).optional(),
+    notes: z.string().max(2000).optional(),
+    is_active: z.boolean().optional(),
+  })
+  .strict();
+
+const chemicalRecord = z
+  .object({
+    chemical_name: z.string().min(1).max(160),
+    chemical_brand: z.string().max(120).optional(),
+    variant_id: z.string().uuid().optional(),
+    qty_used: z.coerce.number().positive(),
+    unit: z.string().min(1).max(20),
+    cost_ngn: z.coerce.number().nonnegative().optional(),
+    notes: z.string().max(1000).optional(),
+  })
+  .strict();
+
 const mk = (schema) => (req, _res, next) => {
   req.body = schema.parse(req.body || {});
   next();
@@ -108,4 +155,7 @@ module.exports = {
   validateJobAdvance: mk(jobAdvance),
   validateAssignStaff: mk(assignStaff),
   validateOutcome: mk(outcome),
+  validateRecipeCreate: mk(recipeCreate),
+  validateRecipeUpdate: mk(recipeUpdate),
+  validateChemicalRecord: mk(chemicalRecord),
 };

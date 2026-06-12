@@ -121,7 +121,12 @@ async function deductForSale({
   // Race-safe oversell pre-check: lock the level row, compare against what is
   // physically on hand. The DB CHECK (on_hand >= 0) is the hard backstop; this
   // turns it into a clean 409 with the actual count instead of a raw 23514.
-  const level = await repo.lockLevel({ client, brand, variant_id, location_id });
+  const level = await repo.lockLevel({
+    client,
+    brand,
+    variant_id,
+    location_id,
+  });
   const onHand = level ? level.on_hand : 0;
   if (onHand < want) {
     throw new AppError(

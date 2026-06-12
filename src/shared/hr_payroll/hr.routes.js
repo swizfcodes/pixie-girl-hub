@@ -114,6 +114,50 @@ router.patch(
 );
 router.delete("/performance-cycles/:id", P("delete"), controller.cycles.remove);
 
+// ── Appraisal scoring + reviews (F-8) ──────────────────────
+// Scores are nested under a cycle; reviews roll the scores into one figure.
+router.get(
+  "/performance-cycles/:cycleId/scores",
+  P("view"),
+  controller.appraisal.listScores,
+);
+router.post(
+  "/performance-cycles/:cycleId/scores",
+  P("edit"),
+  validate.appraisal.score,
+  controller.appraisal.score,
+);
+router.post(
+  "/performance-cycles/:cycleId/reviews",
+  P("edit"),
+  validate.appraisal.reviewGenerate,
+  controller.appraisal.generateReview,
+);
+router.get("/performance-reviews", P("view"), controller.appraisal.listReviews);
+router.get(
+  "/performance-reviews/:id",
+  P("view"),
+  controller.appraisal.getReview,
+);
+router.patch(
+  "/performance-reviews/:id",
+  P("edit"),
+  validate.appraisal.reviewContent,
+  controller.appraisal.updateReview,
+);
+router.post(
+  "/performance-reviews/:id/advance",
+  P("approve"),
+  validate.appraisal.reviewAdvance,
+  controller.appraisal.advanceReview,
+);
+router.post(
+  "/performance-reviews/:id/acknowledge",
+  P("edit"),
+  validate.appraisal.reviewAcknowledge,
+  controller.appraisal.acknowledgeReview,
+);
+
 // ── Payroll deductions (PAYE / pension / NHF) ──────────────
 router.get("/deductions", P("view"), controller.deductions.list);
 router.post(

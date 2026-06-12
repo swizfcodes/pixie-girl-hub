@@ -65,7 +65,10 @@ const auditRouter = require("../shared/audit/audit.routes");
 const accessRouter = require("../shared/access/access.routes");
 const notificationsRouter = require("../shared/notifications/notifications.routes");
 
-const { cartRouter, wishlistRouter } = require("../modules/storefront/cart.routes");
+const {
+  cartRouter,
+  wishlistRouter,
+} = require("../modules/storefront/cart.routes");
 
 // Public (storefront-facing, no auth)
 const publicCatalogueRouter = require("../modules/storefront/public.routes");

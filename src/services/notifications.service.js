@@ -114,7 +114,15 @@ async function getPreferences({ user_id }) {
   return rows;
 }
 
-async function upsertPreference({ user_id, notification_type, in_app, email_enabled, whatsapp_enabled, sms_enabled, push_enabled }) {
+async function upsertPreference({
+  user_id,
+  notification_type,
+  in_app,
+  email_enabled,
+  whatsapp_enabled,
+  sms_enabled,
+  push_enabled,
+}) {
   const { rows } = await query(
     `INSERT INTO shared.notification_preferences
        (user_id, notification_type, in_app, email_enabled, whatsapp_enabled, sms_enabled, push_enabled)
@@ -127,7 +135,15 @@ async function upsertPreference({ user_id, notification_type, in_app, email_enab
            push_enabled     = COALESCE($7, notification_preferences.push_enabled),
            updated_at       = now()
      RETURNING *`,
-    [user_id, notification_type, in_app ?? null, email_enabled ?? null, whatsapp_enabled ?? null, sms_enabled ?? null, push_enabled ?? null],
+    [
+      user_id,
+      notification_type,
+      in_app ?? null,
+      email_enabled ?? null,
+      whatsapp_enabled ?? null,
+      sms_enabled ?? null,
+      push_enabled ?? null,
+    ],
   );
   return rows[0];
 }
@@ -141,4 +157,13 @@ async function isChannelEnabled({ user_id, notification_type, channel }) {
   return rows.length === 0 ? true : rows[0].enabled;
 }
 
-module.exports = { notify, list, unreadCount, markRead, markAllRead, getPreferences, upsertPreference, isChannelEnabled };
+module.exports = {
+  notify,
+  list,
+  unreadCount,
+  markRead,
+  markAllRead,
+  getPreferences,
+  upsertPreference,
+  isChannelEnabled,
+};

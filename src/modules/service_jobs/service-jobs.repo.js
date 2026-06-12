@@ -248,6 +248,206 @@ async function updateServiceJob({ client, brand, id, patch }) {
   return rows[0] || null;
 }
 
+// ── chemical_recipes (F-7c) ────────────────────────────────
+async function listRecipes({ brand, is_active }) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (is_active !== undefined) {
+    where.push(`is_active = $${i++}`);
+    params.push(is_active);
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "chemical_recipes")} ${w} ORDER BY display_name`,
+    params,
+  );
+  return rows;
+}
+async function getRecipe({ brand, id }) {
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "chemical_recipes")} WHERE recipe_id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+async function createRecipe({ brand, r, user_id }) {
+  const { rows } = await query(
+    `INSERT INTO ${t(brand, "chemical_recipes")}
+       (recipe_key, display_name, ingredients, instructions, target_shade, notes, is_active, created_by)
+     VALUES ($1,$2,$3::jsonb,$4,$5,$6,COALESCE($7,true),$8) RETURNING *`,
+    [
+      r.recipe_key,
+      r.display_name,
+      JSON.stringify(r.ingredients),
+      r.instructions || null,
+      r.target_shade || null,
+      r.notes || null,
+      r.is_active === undefined ? null : r.is_active,
+      user_id || null,
+    ],
+  );
+  return rows[0];
+}
+async function updateRecipe({ brand, id, patch }) {
+  const allowed = [
+    "display_name",
+    "ingredients",
+    "instructions",
+    "target_shade",
+    "notes",
+    "is_active",
+  ];
+  const sets = [];
+  const params = [];
+  let i = 1;
+  for (const k of allowed) {
+    if (patch[k] === undefined) continue;
+    if (k === "ingredients") {
+      sets.push(`${k} = $${i++}::jsonb`);
+      params.push(JSON.stringify(patch[k]));
+    } else {
+      sets.push(`${k} = $${i++}`);
+      params.push(patch[k]);
+    }
+  }
+  if (!sets.length) return getRecipe({ brand, id });
+  params.push(id);
+  const { rows } = await query(
+    `UPDATE ${t(brand, "chemical_recipes")} SET ${sets.join(", ")}, updated_at = now()
+      WHERE recipe_id = $${i} RETURNING *`,
+    params,
+  );
+  return rows[0] || null;
+}
+
+// ── service_job_chemicals (F-7d) ───────────────────────────
+async function addJobChemical({ client, brand, jc }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "service_job_chemicals")}
+       (job_id, chemical_name, chemical_brand, variant_id, qty_used, unit, cost_ngn, notes, recorded_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    [
+      jc.job_id,
+      jc.chemical_name,
+      jc.chemical_brand || null,
+      jc.variant_id || null,
+      jc.qty_used,
+      jc.unit,
+      jc.cost_ngn ?? null,
+      jc.notes || null,
+      jc.recorded_by || null,
+    ],
+  );
+  return rows[0];
+}
+async function listJobChemicals({ brand, job_id }) {
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "service_job_chemicals")}
+      WHERE job_id = $1 ORDER BY recorded_at`,
+    [job_id],
+  );
+  return rows;
+}
+
+// ── monthly_chemical_reconciliations (F-7e) ────────────────
+async function getFiscalPeriod({ brand, id }) {
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "fiscal_periods")} WHERE period_id = $1`,
+    [id],
+  );
+  return rows[0] || null;
+}
+// Periods that ended within the last `days` and aren't locked — the month-end
+// reconciliation cron targets these.
+async function periodsEndedWithin({ brand, days }) {
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "fiscal_periods")}
+      WHERE ends_on <= CURRENT_DATE
+        AND ends_on >= CURRENT_DATE - ($1 || ' days')::interval
+        AND status <> 'locked'
+      ORDER BY ends_on DESC`,
+    [String(days)],
+  );
+  return rows;
+}
+// Consumed per chemical for jobs whose chemical usage was recorded in [start,end].
+async function consumedByChemical({ brand, starts_on, ends_on }) {
+  const { rows } = await query(
+    `SELECT chemical_name, unit, SUM(qty_used)::numeric(12,3) AS qty_consumed,
+            SUM(COALESCE(cost_ngn,0))::numeric(14,2) AS cost_ngn
+       FROM ${t(brand, "service_job_chemicals")}
+      WHERE recorded_at::date BETWEEN $1 AND $2
+      GROUP BY chemical_name, unit
+      ORDER BY chemical_name, unit`,
+    [starts_on, ends_on],
+  );
+  return rows;
+}
+async function upsertReconciliation({ client, brand, rec }) {
+  const { rows } = await ex(client)(
+    `INSERT INTO ${t(brand, "monthly_chemical_reconciliations")}
+       (fiscal_period_id, chemical_name, unit, qty_purchased, qty_consumed,
+        qty_disposed, variance_value_ngn, variance_status, investigation_notes, computed_at)
+     VALUES ($1,$2,$3,COALESCE($4,0),COALESCE($5,0),COALESCE($6,0),$7,COALESCE($8,'normal'),$9, now())
+     ON CONFLICT (fiscal_period_id, chemical_name, unit) DO UPDATE
+       SET qty_purchased = EXCLUDED.qty_purchased,
+           qty_consumed = EXCLUDED.qty_consumed,
+           qty_disposed = EXCLUDED.qty_disposed,
+           variance_value_ngn = EXCLUDED.variance_value_ngn,
+           variance_status = EXCLUDED.variance_status,
+           computed_at = now()
+     RETURNING *`,
+    [
+      rec.fiscal_period_id,
+      rec.chemical_name,
+      rec.unit,
+      rec.qty_purchased,
+      rec.qty_consumed,
+      rec.qty_disposed,
+      rec.variance_value_ngn ?? null,
+      rec.variance_status,
+      rec.investigation_notes || null,
+    ],
+  );
+  return rows[0];
+}
+async function listReconciliations({
+  brand,
+  fiscal_period_id,
+  variance_status,
+}) {
+  const where = [];
+  const params = [];
+  let i = 1;
+  if (fiscal_period_id) {
+    where.push(`fiscal_period_id = $${i++}`);
+    params.push(fiscal_period_id);
+  }
+  if (variance_status) {
+    where.push(`variance_status = $${i++}`);
+    params.push(variance_status);
+  }
+  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const { rows } = await query(
+    `SELECT * FROM ${t(brand, "monthly_chemical_reconciliations")} ${w}
+      ORDER BY chemical_name, unit`,
+    params,
+  );
+  return rows;
+}
+// Existing recorded purchased qty for a period (so a recompute preserves the
+// admin-entered qty_purchased / qty_disposed rather than zeroing it).
+async function existingReconciliationMap({ brand, fiscal_period_id }) {
+  const { rows } = await query(
+    `SELECT chemical_name, unit, qty_purchased, qty_disposed
+       FROM ${t(brand, "monthly_chemical_reconciliations")}
+      WHERE fiscal_period_id = $1`,
+    [fiscal_period_id],
+  );
+  return rows;
+}
+
 module.exports = {
   nextNumber,
   listServiceTypes,
@@ -261,4 +461,16 @@ module.exports = {
   serviceJobExistsForOrder,
   setServiceJobStatus,
   updateServiceJob,
+  listRecipes,
+  getRecipe,
+  createRecipe,
+  updateRecipe,
+  addJobChemical,
+  listJobChemicals,
+  getFiscalPeriod,
+  periodsEndedWithin,
+  consumedByChemical,
+  upsertReconciliation,
+  listReconciliations,
+  existingReconciliationMap,
 };

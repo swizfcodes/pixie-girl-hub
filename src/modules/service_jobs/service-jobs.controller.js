@@ -103,6 +103,76 @@ async function recordOutcome(req, res) {
   });
 }
 
+// ── Chemical recipes (F-7c) ────────────────────────────────
+async function listRecipes(req, res) {
+  res.json({
+    data: await service.listRecipes({
+      brand: req.brand,
+      is_active:
+        req.query.is_active === undefined
+          ? undefined
+          : req.query.is_active === "true",
+    }),
+  });
+}
+async function getRecipe(req, res) {
+  res.json({
+    data: await service.getRecipe({ brand: req.brand, id: req.params.id }),
+  });
+}
+async function createRecipe(req, res) {
+  res.status(201).json({
+    data: await service.createRecipe({ ...base(req), input: req.body }),
+  });
+}
+async function updateRecipe(req, res) {
+  res.json({
+    data: await service.updateRecipe({
+      ...base(req),
+      id: req.params.id,
+      patch: req.body,
+    }),
+  });
+}
+
+// ── Service-job chemical consumption (F-7d) ────────────────
+async function recordChemical(req, res) {
+  res.status(201).json({
+    data: await service.recordChemicalConsumption({
+      ...base(req),
+      id: req.params.id,
+      input: req.body,
+    }),
+  });
+}
+async function listChemicals(req, res) {
+  res.json({
+    data: await service.listChemicalConsumption({
+      brand: req.brand,
+      id: req.params.id,
+    }),
+  });
+}
+
+// ── Monthly chemical reconciliation (F-7e) ─────────────────
+async function reconcileChemicals(req, res) {
+  res.json({
+    data: await service.reconcileChemicals({
+      ...base(req),
+      fiscal_period_id: req.params.periodId,
+    }),
+  });
+}
+async function listReconciliations(req, res) {
+  res.json({
+    data: await service.listReconciliations({
+      brand: req.brand,
+      fiscal_period_id: req.query.fiscal_period_id,
+      variance_status: req.query.variance_status,
+    }),
+  });
+}
+
 module.exports = {
   listServiceTypes,
   createServiceType,
@@ -114,4 +184,12 @@ module.exports = {
   advanceJob,
   assignStaff,
   recordOutcome,
+  listRecipes,
+  getRecipe,
+  createRecipe,
+  updateRecipe,
+  recordChemical,
+  listChemicals,
+  reconcileChemicals,
+  listReconciliations,
 };
