@@ -50,11 +50,25 @@ async function initDatabase() {
     logger.error({ err }, "pg pool error");
   });
 
-  // Smoke-test the connection at boot
+  // Smoke-test the connection at boot + surface an RLS misconfiguration early.
   const { rows } = await pool.query(
-    "SELECT NOW() AS now, current_database() AS db",
+    "SELECT NOW() AS now, current_database() AS db, current_user AS usr, current_setting('is_superuser') AS is_superuser",
   );
-  logger.info({ db: rows[0].db, now: rows[0].now }, "database smoke test ok");
+  logger.info(
+    { db: rows[0].db, now: rows[0].now, user: rows[0].usr },
+    "database smoke test ok",
+  );
+
+  // RLS (§1.4): row-level security is bypassed by SUPERUSERS and by the table
+  // owner. If read-enforcement is on but we connected as a superuser, isolation
+  // on shared tables silently does NOT apply — warn loudly so it's caught before
+  // it becomes a cross-entity data leak.
+  if (config.RLS_READ_ENFORCE && rows[0].is_superuser === "on") {
+    logger.warn(
+      { user: rows[0].usr },
+      "RLS_READ_ENFORCE is on but the DB connection is a SUPERUSER — RLS on shared tables is bypassed. Connect as a non-superuser app role (e.g. pixie_app) for entity isolation to take effect.",
+    );
+  }
 
   return pool;
 }

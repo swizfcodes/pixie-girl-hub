@@ -64,4 +64,28 @@ async function markProcessed(id, { error_message = null } = {}) {
   );
 }
 
-module.exports = { insertLog, findById, markProcessed };
+/**
+ * Replayable webhooks: verified inbound events that never completed processing
+ * (processed = false). These are the ones whose outbox retries were exhausted,
+ * or that arrived while a downstream consumer was down. Only signature-valid
+ * rows are returned — an unverified payload is never re-driven. `maxRetries`
+ * caps how many times a row will be picked up so a permanently-broken event
+ * can't loop forever (pass 0/null to ignore the cap). Uses the partial index
+ * idx_webhook_log_unprocessed (source, processed, received_at) WHERE processed = false.
+ */
+async function listReplayable({ source = null, limit = 100, maxRetries = 25 } = {}) {
+  const { rows } = await query(
+    `SELECT webhook_id, source, retry_count, received_at, error_message
+       FROM shared.webhook_log
+      WHERE processed = false
+        AND signature_valid = true
+        AND ($1::text IS NULL OR source = $1)
+        AND ($2::int  IS NULL OR retry_count < $2)
+      ORDER BY received_at ASC
+      LIMIT $3`,
+    [source, maxRetries || null, limit],
+  );
+  return rows;
+}
+
+module.exports = { insertLog, findById, markProcessed, listReplayable };

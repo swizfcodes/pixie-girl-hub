@@ -99,6 +99,41 @@ regression). Completing read-side enforcement (wrapping context'd one-shot
 reads, or a request-scoped connection) is a follow-up that needs a staging
 perf check before rollout.
 
+## Enabling read-side RLS (§1.4) — the runbook
+
+Wiring is correct, but two facts make RLS **inert until you act**, and neither is
+just flipping a flag:
+
+1. **Postgres bypasses RLS for SUPERUSERS and the TABLE OWNER.** `000200` uses
+   `ENABLE` (not `FORCE`), so the owner bypasses; superusers always bypass. CI/dev
+   commonly connect as `postgres` (superuser) → RLS does nothing no matter what.
+   **The app must connect as a non-superuser app role** (the migration provisions
+   `pixie_app`; `.env.example` already points `DB_USER` at a non-`postgres` role).
+   `initDatabase()` now logs a loud warning if `RLS_READ_ENFORCE` is on while the
+   connection is a superuser.
+2. **`RLS_READ_ENFORCE` defaults off**, so one-shot `query()` reads don't set the
+   GUC. Writes (via `transaction()`) already do.
+
+**Steps to turn it on (staging first):**
+
+1. Connect the app as a **non-superuser** role. If that role also owns the tables,
+   apply `scripts/rls/force-rls.sql` so ownership doesn't grant a bypass. (Superuser
+   is never acceptable for the app connection once RLS is relied on.)
+2. Review cross-brand **writes** — under `FORCE`, `WITH CHECK` applies to the owner
+   too. The audit found shared-table writes are brand-consistent (each carries
+   `business` = the request's brand; outbox/webhook bind a single brand;
+   intercompany uses its own dual-brand policy), so this is low-risk — but confirm
+   on staging.
+3. Keep CEO/group cross-brand reads on the **`crossBrand: true`** escape hatch (and
+   `/api/v1/group/*`) so a NULL GUC intentionally shows both brands.
+4. Set `RLS_READ_ENFORCE=true`. Run `RUN_DB_TESTS=1 npx jest entity-isolation` —
+   it provisions a throwaway non-superuser role and proves a brand context sees
+   only its own rows. Then do the **per-read perf check** (read-side adds a
+   BEGIN/COMMIT round-trip; see `MASTER_BUILD_PLAN.md` H-1).
+
+Proof/guard artifacts: `tests/integration/entity-isolation.test.js`,
+`scripts/rls/force-rls.sql`, and the superuser warning in `config/database.js`.
+
 ## What to never, ever do
 
 - **Never** join `pixiegirl.foo` to `faitlynhair.bar` in one query

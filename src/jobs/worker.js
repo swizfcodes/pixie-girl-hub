@@ -22,6 +22,7 @@
  *   every 15m        — Pending action expiry sweep (Praxis)
  *   every 30m        — Layaway gentle payment reminder
  *   every 30m        — Invoice reminder sweep (F-10)
+ *   every 30m        — Webhook replay sweep (H-4 — re-drive stuck webhooks)
  *   daily 03:00      — Soft-FK reconciliation sweep (F-13)
  */
 
@@ -144,6 +145,7 @@ async function startWorkers() {
   const {
     runChemicalReconciliation,
   } = require("./schedulers/chemical-reconciliation");
+  const { runWebhookReplaySweep } = require("./schedulers/webhook-replay");
 
   // Re-sync the brand registry so a business provisioned by the API process
   // reaches this worker's crons without a restart.
@@ -177,6 +179,7 @@ async function startWorkers() {
     runCampaignMetricsRollup,
   );
   scheduleCron("invoice-reminders", "*/30 * * * *", runInvoiceReminderSweep);
+  scheduleCron("webhook-replay", "*/30 * * * *", runWebhookReplaySweep);
   scheduleCron("soft-fk-reconciliation", "0 3 * * *", runSoftFkReconciliation);
   scheduleCron(
     "chemical-reconciliation",

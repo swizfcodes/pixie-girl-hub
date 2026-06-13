@@ -467,4 +467,37 @@ function register() {
 
 register();
 
-module.exports = { receive, metaChallenge, register, onWebhookReceived };
+/**
+ * Hand a failed/unprocessed webhook batch off to the `webhooks-replay` queue.
+ * Enqueues one job per replayable row (so each retries independently with the
+ * queue's own backoff). Safe to call repeatedly — re-processing is idempotent
+ * (recordGatewayPayment dedups on client_idempotency_key + provider reference).
+ * Returns the webhook_ids that were enqueued.
+ */
+async function enqueueReplay({ source = null, limit = 100, maxRetries = 25 } = {}) {
+  const { enqueue } = require("../../jobs/queue-producer");
+  const rows = await repo.listReplayable({ source, limit, maxRetries });
+  for (const r of rows) {
+    await enqueue(
+      "webhooks-replay",
+      "replay",
+      { webhook_id: r.webhook_id },
+      // Stable jobId collapses duplicate enqueues for the same webhook while one
+      // is still pending, so overlapping sweeps don't pile up.
+      { jobId: `replay:${r.webhook_id}` },
+    );
+  }
+  logger.info(
+    { source, count: rows.length },
+    "enqueued webhook replay batch",
+  );
+  return rows.map((r) => r.webhook_id);
+}
+
+module.exports = {
+  receive,
+  metaChallenge,
+  register,
+  onWebhookReceived,
+  enqueueReplay,
+};
