@@ -13,6 +13,7 @@
 "use strict";
 
 const service = require("./auth.service");
+const permissionsRepo = require("../org_workflow/permissions.repo");
 
 async function login(req, res) {
   const { email, password } = req.body || {};
@@ -35,6 +36,43 @@ async function login(req, res) {
       expires_in: result.expires_in,
     },
   });
+}
+
+async function loginPin(req, res) {
+  const { email, pin } = req.body || {};
+  const result = await service.loginPin({
+    email,
+    pin,
+    ip: req.ip,
+    user_agent: req.headers["user-agent"],
+  });
+  res.cookie("refresh_token", result.refresh_token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "strict",
+    maxAge: 14 * 24 * 60 * 60 * 1000,
+  });
+  res.json({
+    data: {
+      user: result.user,
+      access_token: result.access_token,
+      expires_in: result.expires_in,
+    },
+  });
+}
+
+async function pinStatus(req, res) {
+  res.json({ data: await service.getPinStatus({ user_id: req.user.user_id }) });
+}
+
+async function setPin(req, res) {
+  await service.setPin({ user_id: req.user.user_id, pin: req.body?.pin });
+  res.json({ data: { ok: true } });
+}
+
+async function removePin(req, res) {
+  await service.removePin({ user_id: req.user.user_id });
+  res.json({ data: { ok: true } });
 }
 
 async function refresh(req, res) {
@@ -72,4 +110,28 @@ async function resetPassword(req, res) {
   res.json({ data: { ok: true } });
 }
 
-module.exports = { login, refresh, logout, forgotPassword, resetPassword };
+/**
+ * GET /auth/me/permissions
+ * Returns the calling user's effective permission grants for the active brand.
+ * CEO gets a synthetic '*' grant. No extra permission required.
+ */
+async function mePermissions(req, res) {
+  if (req.user.is_ceo) {
+    return res.json({ data: [{ module: "*", action: "*", record_scope: "all" }] });
+  }
+  const { rows } = await permissionsRepo.findAllForRoles({ role_ids: req.user.role_ids });
+  res.json({ data: rows });
+}
+
+module.exports = {
+  login,
+  loginPin,
+  pinStatus,
+  setPin,
+  removePin,
+  refresh,
+  logout,
+  forgotPassword,
+  resetPassword,
+  mePermissions,
+};
